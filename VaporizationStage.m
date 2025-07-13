@@ -198,7 +198,7 @@ classdef VaporizationStage < handle
                     % --- 简化版占位符方程 ---
                     convection_coeff = m_dot * cp_gas / (4 * pi * r^2);
                     diffusion_coeff_T = k_gas;
-                    % dTdr = (convection_coeff * T_something - r^2*omega_T) / diffusion_coeff_T; % 这是一个非常简化的例子
+                    dTdr = (convection_coeff * T_something - r^2*omega_T) / diffusion_coeff_T; % 这是一个非常简化的例子
                     
                     % 组分方程:
                     % dYdr(i) = ...
