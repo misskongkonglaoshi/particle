@@ -49,7 +49,7 @@ classdef StageManager < handle
                 fprintf('当前时间: %.4fs, 进入 %s 阶段...\n', current_time, current_stage_name);
                 
                 t_stage = [];
-                state_stage_history = [];
+                state_stage_history = ParticleState.empty;
                 
                 switch current_stage_name
                     case {'preheating', 'liquid_heating'}
