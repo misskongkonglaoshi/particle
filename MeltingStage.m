@@ -9,8 +9,10 @@ classdef MeltingStage < handle
     methods
         function obj = MeltingStage(params, physicalModel)
             % 构造函数
-            obj.params = params;
-            obj.physicalModel = physicalModel;
+            if nargin > 0
+                obj.params = params;
+                obj.physicalModel = physicalModel;
+            end
         end
         
         function [t_history, X_history, t_end] = solve(obj, particleState, t_start)
@@ -54,7 +56,7 @@ classdef MeltingStage < handle
         
         function dXdt = ode_system(obj, X, particleState)
             % 熔融阶段的ODE系统
-            
+            fprintf('开始求解熔融阶段ode...\n');
             % 计算用于熔化的热通量
             q_conv = obj.params.h_conv * (obj.params.ambient_temperature - particleState.T_p);
             q_rad = obj.params.emissivity * obj.params.sigma * (obj.params.ambient_temperature^4 - particleState.T_p^4);

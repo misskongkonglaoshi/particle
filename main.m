@@ -12,7 +12,7 @@ params = Parameters();
 model = ParticleModel(params);
 
 % 创建阶段管理器
-manager = StageManager(model, params);
+manager = StageManager(params);
 
 % 运行仿真
 fprintf('开始仿真...\n');

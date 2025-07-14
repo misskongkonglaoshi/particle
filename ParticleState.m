@@ -37,11 +37,11 @@ classdef ParticleState < handle
             % 输入:
             %   params: 参数结构体
             
-            % 保存参数
-            obj.params = params;
-            
             % 从params初始化几何参数
             if nargin > 0
+                % 保存参数
+                obj.params = params;
+                
                 % 初始半径
                 initial_radius = params.initial_diameter / 2;
                 

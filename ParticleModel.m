@@ -13,10 +13,11 @@ classdef ParticleModel < handle
             %
             % 输入:
             %   params: 参数对象
-            
-            obj.params = params;
-            % 创建并持有ParticleState实例
-            obj.particleState = ParticleState(params);
+            if nargin > 0
+                obj.params = params;
+                % 创建并持有ParticleState实例
+                obj.particleState = ParticleState(params);
+            end
         end
         
         function stage = determineStage(obj)
@@ -25,16 +26,20 @@ classdef ParticleModel < handle
             T = obj.particleState.T_p;
             T_melt = obj.params.materials.Mg.melting_point;
             T_ignite = obj.params.materials.Mg.ignition_temp;
-            
+            melt_frac = obj.particleState.melted_fraction;
+
             if T >= T_ignite
                 stage = 'vaporization';
-            elseif T >= T_melt
-                if obj.particleState.melted_fraction < 1.0
+            elseif T < T_melt
+                stage = 'preheating';
+            elseif T >= T_melt && T < T_ignite
+                if melt_frac < 1.0
                     stage = 'melting';
-                else
-                    stage = 'heating';
+                else % melt_frac == 1.0
+                    stage = 'liquid_heating';
                 end
             else
+                % 兜底情况，理论上不应到达
                 stage = 'preheating';
             end
         end

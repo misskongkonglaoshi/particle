@@ -14,9 +14,10 @@ classdef PhysicalModel < handle
             % 输入:
             %   params: 参数对象
             %   thermo_reader: ThermoReader 实例
-            
-            obj.params = params;
-            obj.thermo_reader = thermo_reader;
+            if nargin > 0
+                obj.params = params;
+                obj.thermo_reader = thermo_reader;
+            end
         end
         
         function cp_total = calculate_total_heat_capacity(obj, particleState)
@@ -63,18 +64,14 @@ classdef PhysicalModel < handle
             % 输出:
             %   cp: 摩尔比热容 (J/(mol·K))
             
-            if isempty(obj.thermo_reader)
-                 % 如果没有提供thermo_reader，则使用常数比热
+            % 如果没有提供thermo_reader或缺少物种数据，则使用常数比热
+            if isempty(obj.thermo_reader) || ~obj.thermo_reader.has_species(species)
                 cp = obj.params.materials.(species).heat_capacity * obj.params.materials.(species).molar_mass;
                 return;
             end
             
-            % 获取NASA多项式系数
-            coeffs = obj.thermo_reader.get_coeffs(species, T);
-            
-            % 计算摩尔比热容 Cp/R = a1 + a2*T + a3*T^2 + a4*T^3 + a5*T^4
-            R = obj.params.R_u; % 通用气体常数 (J/(mol·K))
-            cp = R * (coeffs(1) + coeffs(2)*T + coeffs(3)*T^2 + coeffs(4)*T^3 + coeffs(5)*T^4);
+            % 直接调用ThermoReader中的方法进行计算
+            cp = obj.thermo_reader.calculate_Cp(species, T);
         end
         
         function props = get_gas_properties(obj, T_gas)
