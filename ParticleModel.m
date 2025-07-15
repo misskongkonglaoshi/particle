@@ -21,26 +21,26 @@ classdef ParticleModel < handle
         end
         
         function stage = determineStage(obj)
-            % 根据当前颗粒状态确定所处的阶段
+            % 根据当前颗粒状态确定所处的阶段 (引入容差以提高鲁棒性)
             
-            T = obj.particleState.T_p;
+            TOL = 1e-6; % 定义一个小的容差来处理浮点数比较问题
+            T_p = obj.particleState.T_p;
             T_melt = obj.params.materials.Mg.melting_point;
             T_ignite = obj.params.materials.Mg.ignition_temp;
-            melt_frac = obj.particleState.melted_fraction;
-
-            if T >= T_ignite
+            ps = obj.particleState;
+            
+            if T_p < T_melt - TOL
+                stage = 'preheating';
+            elseif abs(T_p - T_melt) < TOL && ps.melted_fraction < 1
+                stage = 'melting';
+            elseif T_p > T_melt - TOL && ps.melted_fraction >= 1 && T_p < T_ignite
+                stage = 'liquid_heating';
+            elseif T_p >= T_ignite
                 stage = 'vaporization';
-            elseif T < T_melt
-                stage = 'preheating';
-            elseif T >= T_melt && T < T_ignite
-                if melt_frac < 1.0
-                    stage = 'melting';
-                else % melt_frac == 1.0
-                    stage = 'liquid_heating';
-                end
             else
-                % 兜底情况，理论上不应到达
-                stage = 'preheating';
+                % 默认或未知状态处理, 增加诊断信息
+                fprintf('警告: 无法确定颗粒阶段。 T_p=%.4f, melted_fraction=%.4f\n', T_p, ps.melted_fraction);
+                stage = 'unknown';
             end
         end
         

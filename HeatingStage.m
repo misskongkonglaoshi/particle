@@ -31,7 +31,7 @@ classdef HeatingStage < handle
             particleState.melted_fraction = 1.0;
 
             % 定义求解的ODE
-            ode_func = @(t, T) obj.ode_system(T, particleState);
+            ode_func = @(t, T) obj.ode_system(t, T, particleState);
 
             % 设置求解时间跨度和初始条件
             tspan = [t_start, obj.params.total_time];
@@ -46,7 +46,7 @@ classdef HeatingStage < handle
             % --- 结束诊断 ---
 
             % 设置事件函数，当温度达到动态指定的目标温度时停止
-            options = odeset('Events', @(t, y) obj.reach_target_temp_event(t, y, target_temp));
+            options = odeset('Events', @(t, y) obj.target_temp_event(t, y, target_temp));
             
             % 调用ODE求解器
             [t_history, T_history, te, ~, ~] = ode45(ode_func, tspan, y0, options);
@@ -61,30 +61,34 @@ classdef HeatingStage < handle
             end
         end
         
-        function dTdt = ode_system(obj, T, particleState)
-            % 加热阶段的ODE系统
-            % fprintf('开始加热阶段ode...\n');
-            % 更新瞬时温度以进行计算
+        function dTdt = ode_system(obj, t, T, particleState)
+            % 更新粒子状态以便进行热容计算
             particleState.T_p = T;
             
-            % 计算热通量 (与预热阶段相同)
-            q_conv = obj.params.h_conv * (obj.params.ambient_temperature - T);
-            q_rad = obj.params.emissivity * obj.params.sigma * (obj.params.ambient_temperature^4 - T^4);
+            % 计算总热通量 (对流 + 辐射)
+            Q_flux = obj.physicalModel.calculate_heat_flux(particleState);
+
+            % 定义反应放热的接口 (目前为0)
+            Q_reaction = 0;
             
-            A_p = 4 * pi * particleState.r_p^2;
-            Q_total = (q_conv + q_rad) * A_p;
+            % 总热量
+            Q_total = Q_flux + Q_reaction;
+
+            % 计算总热容 (J/K)
+            Cp_total = obj.physicalModel.calculate_total_heat_capacity(particleState);
             
-            % 计算热容
-            Cp = obj.physicalModel.calculate_total_heat_capacity(particleState);
-            
-            if Cp > 1e-9
-                dTdt = Q_total / Cp;
-            else
+            % 根据正确的物理公式 dT/dt = Q_total / Cp_total 计算
+            if Cp_total < 1e-9
                 dTdt = 0;
+            else
+                dTdt = Q_total / Cp_total;
             end
+            
+            % 确保返回的是列向量
+            dTdt = dTdt(:);
         end
         
-        function [value, isterminal, direction] = reach_target_temp_event(obj, ~, y, target_temp)
+        function [value, isterminal, direction] = target_temp_event(~, t, y, target_temp)
             % 事件函数: 当温度达到目标温度时触发
             value = y(1) - target_temp;
             isterminal = 1; % 触发后终止求解

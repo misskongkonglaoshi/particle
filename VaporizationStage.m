@@ -9,8 +9,8 @@ classdef VaporizationStage < handle
         function obj = VaporizationStage(params, physicalModel)
             % 构造函数
             if nargin > 0
-                obj.params = params;
-                obj.physicalModel = physicalModel;
+            obj.params = params;
+            obj.physicalModel = physicalModel;
                 % 使用从上层传递下来的共享ThermoReader实例
                 obj.thermo = physicalModel.thermo_reader; 
             end
@@ -35,7 +35,7 @@ classdef VaporizationStage < handle
             r_p = pState.r_p;
             T_p = pState.T_p;
             r_inf = r_p + obj.params.flam_thickness;
-
+            
             % 从参数文件加载摩尔质量 (kg/mol)
             M_Mg = obj.params.materials.Mg.molar_mass;
             M_CO2 = obj.params.materials.CO2.molar_mass;
@@ -87,11 +87,11 @@ classdef VaporizationStage < handle
                 % 计算衍生的总产物生成率 (kg/s)
                 m_prod_mgo_total = m_dot_mg_reac * w_MgO;
                 m_prod_co_total  = m_dot_mg_reac * w_CO;
-                
+
                 % 计算在空间中恒定的总对流质量流率 (kg/s)
                 % m_dot_total = (Mg蒸发) - (向内流动的产物)
                 m_dot_total = m_dot_mg_reac - beta * (m_prod_mgo_total + m_prod_co_total);
-
+                
                 % 获取温度依赖的物性
                 T = z(1);
                 props = obj.physicalModel.get_gas_properties(T);
@@ -122,7 +122,7 @@ classdef VaporizationStage < handle
                 m_dot_mg_reac = params(1);
                 r_f           = params(2);
                 beta          = params(3);
-
+                
                 % 2. 解包边界点状态向量
                 T_p_sol = yleft(1,1); Y_p_sol = yleft(2:5,1); d_p_sol = yleft(6:10,1);
                 T_f_L = yright(1,1); Y_f_L = yright(2:5,1); d_f_L = yright(6:10,1);
@@ -149,7 +149,9 @@ classdef VaporizationStage < handle
                 % --- BCs at r = r_p (颗粒表面, 6个条件) ---
                 res(1) = T_p_sol - T_p; % 1. 温度
                 
-                MW_mix_p = 1 / sum(Y_p_sol ./ [M_Mg, M_MgO, M_CO, M_CO2]);
+                % 确保 M_species 是列向量以匹配 Y_p_sol 的维度
+                M_species = [M_Mg; M_MgO; M_CO; M_CO2];
+                MW_mix_p = 1 / sum(Y_p_sol ./ M_species);
                 p_sat_Mg = obj.thermo.get_p_sat(T_p_sol);
                 Y_Mg_sat = (p_sat_Mg / obj.params.ambient_pressure) * (M_Mg / MW_mix_p);
                 res(2) = Y_p_sol(1) - Y_Mg_sat; % 2. Mg饱和蒸气压
@@ -223,8 +225,8 @@ classdef VaporizationStage < handle
                 err_mg = J_Mg_L / (-m_dot_mg_reac / (4*pi*r_f^2)); % 应为1
                 err_co2 = J_CO2_R / (-m_reac_co2_total / (4*pi*r_f^2)); % 应为1
                 res(18) = err_mg - err_co2; % 强制比率相等
-            end
-
+                end
+                
             function y = initial_guess(r, k, p)
                 % 为BVP求解器提供状态向量的初始猜测
                 % y(1-5): T, Y_Mg, Y_MgO, Y_CO, Y_CO2

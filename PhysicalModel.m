@@ -15,8 +15,8 @@ classdef PhysicalModel < handle
             %   params: 参数对象
             %   thermo_reader: ThermoReader 实例
             if nargin > 0
-                obj.params = params;
-                obj.thermo_reader = thermo_reader;
+            obj.params = params;
+            obj.thermo_reader = thermo_reader;
             end
         end
         
@@ -72,6 +72,33 @@ classdef PhysicalModel < handle
             
             % 直接调用ThermoReader中的方法进行计算
             cp = obj.thermo_reader.calculate_Cp(species, T);
+            
+            % 防御性修复: 确保返回的是一个标量
+            % 即使 calculate_Cp 错误地返回一个向量, 这里也会将其求和为标量
+            if ~isscalar(cp)
+                cp = sum(cp);
+            end
+        end
+        
+        function Q_total = calculate_heat_flux(obj, particleState)
+            % 计算颗粒与环境之间的总热通量 (W)
+            %
+            % 输入:
+            %   particleState: 当前的颗粒状态对象
+            % 输出:
+            %   Q_total: 总热通量 (W), >0表示吸热
+
+            T_p = particleState.T_p;
+            A_p = 4 * pi * particleState.r_p^2;
+
+            % 对流换热
+            q_conv = obj.params.h_conv * (obj.params.ambient_temperature - T_p);
+            
+            % 辐射换热
+            q_rad = obj.params.emissivity * obj.params.sigma * (obj.params.ambient_temperature^4 - T_p^4);
+            
+            % 总热通量 (W)
+            Q_total = (q_conv + q_rad) * A_p;
         end
         
         function props = get_gas_properties(obj, T_gas)

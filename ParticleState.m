@@ -215,16 +215,25 @@ classdef ParticleState < handle
         
         function new_obj = copy(obj)
             % 创建当前对象的一个深拷贝
-            new_obj = ParticleState(obj.params); % 创建一个新实例
             
-            % 复制所有属性值
-            props = properties(obj);
+            % 1. 创建一个同类的新实例，但不调用构造函数
+            new_obj = feval(class(obj)); 
+            
+            % 2. 获取所有属性的元数据
+            props = metaclass(obj).PropertyList;
+            
+            % 3. 逐一复制属性
             for i = 1:length(props)
-                prop_name = props{i};
-                if ~strcmp(prop_name, 'params') % params 已经是引用，不需要复制
-                    new_obj.(prop_name) = obj.(prop_name);
+                prop = props(i);
+                % 只复制非瞬态、非依赖、公共的属性
+                if ~prop.Transient && ~prop.Dependent && strcmp(prop.GetAccess, 'public')
+                    new_obj.(prop.Name) = obj.(prop.Name);
                 end
             end
+            
+            % 4. 特殊处理私有属性 (如果需要)
+            % params 是一个对象引用, 直接复制引用即可
+            new_obj.params = obj.params;
         end
     end
 end 

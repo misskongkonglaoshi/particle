@@ -68,7 +68,7 @@ classdef Parameters < handle
         
         % 仿真控制参数
         time_step = 1e-6;          % 时间步长 (s)
-        total_time = 0.1;          % 总仿真时间 (s)
+        total_time = 1;          % 总仿真时间 (s)
         t_combustion = 0.05;       % 气相燃烧求解时长 (s)
         output_interval = 1000;     % 输出间隔（步数）
         

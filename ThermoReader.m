@@ -47,16 +47,37 @@ classdef ThermoReader < handle
                 line4 = fgetl(fid);
 
                 try
+                    % --- 开始修改: 使用sprintf填充字符串以确保长度 ---
+                    line2 = sprintf('%-75s', line2);
+                    line3 = sprintf('%-75s', line3);
+                    line4 = sprintf('%-60s', line4); % 第4行有4个系数，需要60个字符
+                    % --- 结束修改 ---
+
                     % 解析第一行
                     species_name = strtrim(line1(1:18));
-                    temp_ranges_str = sscanf(line1(46:65), '%f');
+                    % --- 开始修改: 扩大温度读取范围 ---
+                    temp_ranges_str = sscanf(line1(46:73), '%f');
+                    % --- 结束修改 ---
                     T_low = temp_ranges_str(1);
                     T_high = temp_ranges_str(2);
                     T_mid = temp_ranges_str(3);
 
-                    % 解析系数
-                    coeffs_str = [line2(1:75), line3(1:75), line4(1:50)];
-                    coeffs_vals = sscanf(coeffs_str, '%e');
+                    % --- 开始修改: 使用健壮的固定宽度解析方法 ---
+                    coeffs_str_cell = {};
+                    % 第2行: 5个系数
+                    for i=1:5
+                        coeffs_str_cell{end+1} = line2((i-1)*15+1 : i*15);
+                    end
+                    % 第3行: 5个系数
+                    for i=1:5
+                        coeffs_str_cell{end+1} = line3((i-1)*15+1 : i*15);
+                    end
+                    % 第4行: 4个系数
+                    for i=1:4
+                        coeffs_str_cell{end+1} = line4((i-1)*15+1 : i*15);
+                    end
+                    coeffs_vals = str2double(coeffs_str_cell);
+                    % --- 结束修改 ---
                     
                     if length(coeffs_vals) ~= 14
                         warning('物种 %s 的系数数量不为14，跳过。', species_name);
@@ -94,22 +115,22 @@ classdef ThermoReader < handle
         function Cp = calculate_Cp(obj, species, T)
             % 计算定压比热容 (J/mol·K)
             a = obj.get_coeffs(species, T);
-            T_vec = [1, T, T.^2, T.^3, T.^4];
-            Cp = sum(a(1:5)' .* T_vec) * obj.Ru;
+            T_vec = [1; T; T.^2; T.^3; T.^4];
+            Cp = (a(1:5) * T_vec) * obj.Ru;
         end
         
         function H = calculate_H(obj, species, T)
             % 计算焓 (J/mol)
             a = obj.get_coeffs(species, T);
-            T_vec = [1, T/2, T.^2/3, T.^3/4, T.^4/5, 1./T];
-            H = (sum(a(1:6)' .* T_vec)) * obj.Ru * T;
+            T_vec = [1; T/2; T.^2/3; T.^3/4; T.^4/5; 1./T];
+            H = (a(1:6) * T_vec) * obj.Ru * T;
         end
         
         function S = calculate_S(obj, species, T)
             % 计算熵 (J/mol·K)
             a = obj.get_coeffs(species, T);
-            T_vec = [log(T), T, T.^2/2, T.^3/3, T.^4/4];
-            S = (sum(a(1:5)' .* T_vec) + a(7)) * obj.Ru;
+            T_vec = [log(T); T; T.^2/2; T.^3/3; T.^4/4];
+            S = (a(1:5) * T_vec + a(7)) * obj.Ru;
         end
         
         function p_sat = get_p_sat(obj, T_kelvin)

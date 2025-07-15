@@ -53,54 +53,74 @@ classdef StageManager < handle
                 
                 switch current_stage_name
                     case {'preheating', 'liquid_heating'}
-                        solver = HeatingStage(obj.params, obj.physicalModel);
                         if strcmp(current_stage_name, 'preheating')
+                            solver = PreheatingStage(obj.params, obj.physicalModel);
                             target_temp = obj.params.materials.Mg.melting_point;
+                            fprintf('--- 进入固相加热阶段 ---\n');
                             fprintf('  (目标: 熔点 %.1f K)\n', target_temp);
                         else % liquid_heating
+                            solver = HeatingStage(obj.params, obj.physicalModel);
                             target_temp = obj.params.materials.Mg.ignition_temp;
+                            fprintf('--- 进入液相加热阶段 ---\n');
                             fprintf('  (目标: 点火温度 %.1f K)\n', target_temp);
                         end
-                        [t_stage, T_stage] = solver.solve(obj.model.particleState, current_time, target_temp);
                         
-                        % --- 开始修改 ---
+                        % 前置条件检查: 如果当前温度已达到或超过目标，则跳过求解
+                        if obj.model.particleState.T_p >= target_temp
+                            fprintf('  (跳过: 当前温度 %.1f K >= 目标温度 %.1f K)\n', obj.model.particleState.T_p, target_temp);
+                            t_stage = [current_time, current_time];
+                            T_stage = [obj.model.particleState.T_p, obj.model.particleState.T_p];
+                        else
+                            initial_state_template = obj.model.particleState.copy(); % 保存阶段初始状态
+                            [t_stage, T_stage] = solver.solve(obj.model.particleState, current_time, target_temp);
+                        end
+
                         % 直接根据HeatingStage的输出构建正确的状态历史
                         num_steps = length(T_stage);
-                        state_stage_history(1, num_steps) = ParticleState(); % 预分配
-                        for i = 1:num_steps
-                            tempState = obj.model.particleState.copy(); % 复制通用状态
-                            tempState.T_p = T_stage(i);                 % 更新当前步的温度
-                            state_stage_history(i) = tempState;
+                        if ~isempty(t_stage)
+                            state_stage_history(1, num_steps) = ParticleState(); % 预分配
+                            for i = 1:num_steps
+                                tempState = initial_state_template.copy(); % 从初始状态模板复制
+                                tempState.T_p = T_stage(i);                % 仅更新当前步的温度
+                                state_stage_history(i) = tempState;
+                            end
                         end
-                        % --- 结束修改 ---
 
                     case 'melting'
                         solver = MeltingStage(obj.params, obj.physicalModel);
+
+                        % --- 开始修改 (2/2) ---
+                        initial_state_template = obj.model.particleState.copy(); % 保存阶段初始状态
                         [t_stage, X_stage] = solver.solve(obj.model.particleState, current_time);
                         
-                        % --- 开始修改 ---
                         % 直接根据MeltingStage的输出构建正确的状态历史
                         num_steps = length(X_stage);
-                        state_stage_history(1, num_steps) = ParticleState(); % 预分配
-                        for i = 1:num_steps
-                            tempState = obj.model.particleState.copy(); % 复制通用状态
-                            tempState.melted_fraction = X_stage(i);     % 更新当前步的熔化分数
-                            state_stage_history(i) = tempState;
+                        if ~isempty(t_stage)
+                            state_stage_history(1, num_steps) = ParticleState(); % 预分配
+                            for i = 1:num_steps
+                                tempState = initial_state_template.copy();      % 从初始状态模板复制
+                                tempState.melted_fraction = X_stage(i);         % 更新当前步的熔化分数
+                                tempState.T_p = obj.params.materials.Mg.melting_point; % 确保温度为熔点
+                                state_stage_history(i) = tempState;
+                            end
                         end
                         % --- 结束修改 ---
                         
                     case 'vaporization'
                         % 使用ode45进行自适应时间步长求解
                         vaporization_solver = VaporizationStage(obj.params, obj.physicalModel);
-                        % 状态向量 y = [m_mg, m_mgo]
-                        y0 = [obj.model.particleState.m_mg, obj.model.particleState.m_mgo];
+                        
+                        % --- 开始修改 (1/3): 扩展初始状态向量y0以包含温度 ---
+                        y0 = [obj.model.particleState.m_mg, obj.model.particleState.m_mgo, obj.model.particleState.T_p];
+                        % --- 结束修改 ---
+
                         t_span = [current_time, obj.params.total_time];
                         
                         ode_options = odeset('RelTol', 1e-5, 'Events', @(t,y) obj.vaporization_events(t,y));
                         
                         [t_stage, y_stage] = ode45(@(t,y) obj.vaporization_ode(t, y, vaporization_solver), t_span, y0, ode_options);
                         
-                        % 将质量历史转换为状态历史
+                        % 将质量和温度历史转换为状态历史
                         state_stage_history = obj.convert_mass_to_state_history(y_stage);
                 end
 
@@ -124,42 +144,75 @@ classdef StageManager < handle
                 end
             end
             
-            % 准备返回结果
             results = obj.prepareResults();
         end
 
         function dydt = vaporization_ode(obj, t, y, solver)
-            % ODE函数句柄，用于ode45
-            % y(1) -> m_mg (颗粒核心Mg的质量)
-            % y(2) -> m_mgo (颗粒上MgO的质量)
+            % --- 开始修改 (2/3): 重写ODE函数以包含温度耦合 ---
+            % y(1) -> m_mg, y(2) -> m_mgo, y(3) -> T_p
             
             % 1. 从当前状态y构建一个临时的ParticleState对象
             tempState = obj.model.particleState.copy(); % 复制以保留其他状态
             tempState.m_mg = y(1);
             tempState.m_mgo = y(2);
+            tempState.T_p = y(3);
             tempState.update_geometry_from_mass(); % 根据新质量更新半径
 
             % 2. 调用BVP求解器获取瞬时反应速率
             try
                 rate_info = solver.solve(tempState);
                 dmdt_mg = -rate_info.m_dot_mg_reac; % 消耗率，所以为负
-                % fprintf('反应mg消耗量：%.4f \n',dmdt_mg);
             catch ME
                 fprintf('t=%.4f s 时BVP求解失败: %s\n', t, ME.message);
-                %fprintf('m_dot_mg_reac=%.4f s 时BVP求解失败: %s\n',m_dot_mg_reac, ME.message);
-                dmdt_mg = 0; % 求解失败时，速率为0，让ode45减小步长重试
+                dmdt_mg = 0; % 求解失败时，速率为0
             end
 
             % 3. 根据化学计量关系计算m_mgo的变化率
-            % 反应: 2Mg + CO2 -> 2MgO + C, 摩尔质量比为 1:1
             mw_mg = obj.params.materials.Mg.molar_mass;
             mw_mgo = obj.params.materials.MgO.molar_mass;
-            dmol_mg_dt = -dmdt_mg / mw_mg; % Mg消耗的摩尔速率 (正值)
-            dmdt_mgo = dmol_mg_dt * mw_mgo; % MgO生成的质量速率
-
-            dydt = [dmdt_mg; dmdt_mgo];
+            if dmdt_mg < 0
+                dmol_mg_dt = -dmdt_mg / mw_mg; % Mg消耗的摩尔速率 (正值)
+                dmdt_mgo = dmol_mg_dt * mw_mgo; % MgO生成的质量速率
+            else
+                dmdt_mgo = 0;
+            end
             
-            fprintf('  t=%.4f s, m_mg=%.2e kg, m_mgo=%.2e kg, dm_mg/dt=%.2e kg/s\n', t, y(1), y(2), dmdt_mg);
+            % 4. 计算温度变化率 dT/dt = (Q_reac - Q_loss) / C_p_total
+            % 4.1 计算反应热 Q_reac = d(mol_mg)/dt * H_reac
+            % 反应: Mg + 0.5 CO2 -> MgO + 0.5 C (假设)
+            % 需要计算反应焓变 (J/mol_Mg)
+            H_mg_g = obj.thermo_reader.calculate_H('Mg', tempState.T_p); % 气态Mg
+            H_co2 = obj.thermo_reader.calculate_H('CO2', tempState.T_p);
+            H_mgo_g = obj.thermo_reader.calculate_H('MgO', tempState.T_p); % 气态MgO
+            H_c_s = 0; % 固态C的生成焓近似为0
+            H_reac_per_mol_mg = H_mgo_g + 0.5 * H_c_s - H_mg_g - 0.5 * H_co2;
+            
+            if dmdt_mg < 0
+                Q_reac = dmol_mg_dt * (-H_reac_per_mol_mg); % 放热为正
+            else
+                Q_reac = 0;
+            end
+
+            % 4.2 计算热损失 Q_loss
+            q_conv = obj.params.h_conv * (tempState.T_p - obj.params.ambient_temperature);
+            q_rad = obj.params.emissivity * obj.params.sigma * (tempState.T_p^4 - obj.params.ambient_temperature^4);
+            A_p = 4 * pi * tempState.r_p^2;
+            Q_loss = (q_conv + q_rad) * A_p;
+
+            % 4.3 计算总热容 C_p_total
+            Cp_total = obj.physicalModel.calculate_total_heat_capacity(tempState);
+            
+            % 4.4 计算dT/dt
+            if Cp_total > 1e-9
+                dTdt = (Q_reac - Q_loss) / Cp_total;
+            else
+                dTdt = 0;
+            end
+
+            dydt = [dmdt_mg; dmdt_mgo; dTdt];
+            
+            fprintf('  t=%.4f s, m_mg=%.2e, T_p=%.1f K, dm/dt=%.2e, dT/dt=%.2e\n', t, y(1), y(3), dmdt_mg, dTdt);
+            % --- 结束修改 ---
         end
         
         function [value, isterminal, direction] = vaporization_events(obj, t, y)
@@ -191,9 +244,13 @@ classdef StageManager < handle
         end
 
         function state_history = convert_mass_to_state_history(obj, y_stage)
-            % 辅助函数: 将质量历史转换为状态历史
-            % y_stage 是一个 N x 2 的矩阵, [m_mg, m_mgo]
+            % --- 开始修改 (3/3): 更新辅助函数以处理包含温度的状态向量 ---
+            % y_stage 是一个 N x 3 的矩阵, [m_mg, m_mgo, T_p]
             num_steps = size(y_stage, 1);
+            if num_steps == 0
+                state_history = ParticleState.empty;
+                return;
+            end
             state_history(1, num_steps) = ParticleState(); % 使用默认构造函数进行预分配
             
             % 获取此阶段开始时的其他状态作为模板
@@ -203,12 +260,17 @@ classdef StageManager < handle
                 tempState = initial_state_template.copy();
                 tempState.m_mg = y_stage(i, 1);
                 tempState.m_mgo = y_stage(i, 2);
+                tempState.T_p = y_stage(i, 3);
                 tempState.update_geometry_from_mass(); % 重要: 根据新质量更新几何
                 
                 state_history(i) = tempState;
             end
+            % --- 结束修改 ---
         end
 
+
+
+        %%%%%  本质即从运行计算的结果中读取想要的参数结果 转化为易于出图的结构形式。
         function results = prepareResults(obj)
             % 辅助函数: 将历史记录转换为易于绘图和分析的格式
             num_entries = length(obj.results.time);
@@ -226,6 +288,7 @@ classdef StageManager < handle
             results.mass_mgo = zeros(num_entries, 1);
             results.mass_c = zeros(num_entries, 1);
             results.radius = zeros(num_entries, 1);
+            results.oxide_thickness = zeros(num_entries, 1); % 提取氧化层厚度
 
             % 填充数据
             for i = 1:num_entries
@@ -236,6 +299,7 @@ classdef StageManager < handle
                 results.mass_mgo(i) = state.m_mgo;
                 results.mass_c(i) = state.m_c;
                 results.radius(i) = state.r_p;
+                results.oxide_thickness(i) = state.oxide_thickness; % 提取氧化层厚度
             end
         end
     end
