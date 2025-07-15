@@ -42,15 +42,20 @@ classdef ThermoReader < handle
                     break;
                 end
                 
+                % 跳过文件中的空行或纯空格行
+                if isempty(strtrim(line1))
+                    continue;
+                end
+                
                 line2 = fgetl(fid);
                 line3 = fgetl(fid);
                 line4 = fgetl(fid);
 
                 try
-                    % --- 开始修改: 使用sprintf填充字符串以确保长度 ---
+                    % --- 开始修改: 使用sprintf填充所有系数行以确保长度 ---
                     line2 = sprintf('%-75s', line2);
                     line3 = sprintf('%-75s', line3);
-                    line4 = sprintf('%-60s', line4); % 第4行有4个系数，需要60个字符
+                    line4 = sprintf('%-75s', line4);
                     % --- 结束修改 ---
 
                     % 解析第一行
@@ -148,6 +153,95 @@ classdef ThermoReader < handle
         
         function has_data = has_species(obj, species)
             has_data = isfield(obj.species_data, species);
+        end
+
+        function dH = get_reaction_enthalpy(obj, reaction_string, T)
+            % 计算化学反应的焓变 (J/mol of reaction)
+            %
+            % 输入:
+            %   reaction_string: 形如 "A+2B=C+D" 的字符串
+            %   T: 温度 (K)
+            % 输出:
+            %   dH: 反应焓变 (J/mol)
+
+            % 1. 解析反应物和产物
+            parts = strsplit(reaction_string, '=');
+            if numel(parts) ~= 2
+                error('ThermoReader:InvalidReactionFormat', ...
+                      '反应式 "%s" 格式无效，必须包含一个 "="。', reaction_string);
+            end
+            
+            reactant_str = parts{1};
+            product_str = parts{2};
+
+            % 2. 计算产物总焓
+            H_products = obj.calculate_side_enthalpy(product_str, T);
+
+            % 3. 计算反应物总焓
+            H_reactants = obj.calculate_side_enthalpy(reactant_str, T);
+            
+            % 4. 返回反应焓变
+            dH = H_products - H_reactants;
+        end
+        
+        function H_total = calculate_side_enthalpy(obj, side_string, T)
+            % Helper: 计算反应式一侧的总焓
+            terms = strsplit(side_string, '+');
+            H_total = 0;
+            for i = 1:numel(terms)
+                term = strtrim(terms{i});
+                [coeff, species_name] = obj.parse_term(term);
+                
+                % 将用户友好的名称映射到thermo.dat中的键
+                [thermo_key, is_solid] = obj.map_species_name(species_name);
+
+                % 检查物种是否存在
+                if obj.has_species(thermo_key)
+                    % 优先使用thermo.dat中的详细数据
+                    H_total = H_total + coeff * obj.calculate_H(thermo_key, T);
+                elseif is_solid && isfield(obj.params.materials, thermo_key)
+                    % 如果是固相且在thermo.dat中找不到, 则回退到params.m中的Hf298
+                    % 这是一个近似, 忽略了固相焓随温度的变化
+                    fprintf('注意: 在thermo.dat中未找到固相 "%s", 已回退使用params.m中定义的Hf298。\n', species_name);
+                    H_total = H_total + coeff * obj.params.materials.(thermo_key).Hf298;
+                else
+                    error('ThermoReader:SpeciesNotFound', ...
+                          '在解析 "%s" 时，无法在任何数据源中找到物种 "%s" (映射为 "%s")', ...
+                          term, species_name, thermo_key);
+                end
+            end
+        end
+
+        function [coeff, species_name] = parse_term(~, term)
+            % Helper: 解析 "2H2O" 这样的项
+            % 使用正则表达式查找前导数字 (系数) 和物种名称
+            tokens = regexp(term, '^\s*(\d*\.?\d*)\s*([\w\(\)]+)\s*$', 'tokens');
+            
+            if isempty(tokens)
+                error('ThermoReader:InvalidTermFormat', '无法解析反应项: "%s"', term);
+            end
+            
+            coeff_str = tokens{1}{1};
+            species_name = tokens{1}{2};
+            
+            if isempty(coeff_str)
+                coeff = 1;
+            else
+                coeff = str2double(coeff_str);
+            end
+        end
+
+        function [thermo_key, is_solid] = map_species_name(~, user_name)
+            % Helper: 将用户输入的名称映射到 thermo.dat 中的键, 并判断是否为固相
+            % 'Mg(g)' -> 'Mg', 'MgO(s)' -> 'MgO', 'C(s)' -> 'C', etc.
+            
+            is_solid = contains(user_name, '(s)', 'IgnoreCase', true);
+            
+            % 使用正则表达式移除末尾的相态标识, 例如 (s), (g), (l)
+            % 这会保留物种名称本身的大小写, 例如 MgO
+            key = regexprep(user_name, '\s*\([sglSGL]\)\s*$', '');
+            
+            thermo_key = strtrim(key);
         end
 
         function value = get_property(obj, species, property_name)

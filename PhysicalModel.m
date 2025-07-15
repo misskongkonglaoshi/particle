@@ -108,5 +108,79 @@ classdef PhysicalModel < handle
             props = obj.params.gas_properties;
         end
 
+        function H = get_enthalpy_from_state(obj, particleState)
+            % 根据颗粒状态（温度和熔化分数）计算其总焓 (J)
+            % 参考点: 固态物质在0K时焓为0
+            
+            T = particleState.T_p;
+            X = particleState.melted_fraction;
+            T_melt = obj.params.materials.Mg.melting_point;
+            
+            % 我们需要一个在0K到T_melt之间的平均总热容
+            % 为简单起见, 我们使用在初始温度下的热容作为整个固相的常数热容
+            tempState_solid = particleState.copy();
+            tempState_solid.T_p = obj.params.initial_temperature;
+            Cp_total_solid = obj.calculate_total_heat_capacity(tempState_solid);
+
+            % 熔点时固相的焓
+            H_solid_at_melt = Cp_total_solid * T_melt;
+            
+            % 熔化潜热
+            L_m_total = particleState.m_mg * obj.params.materials.Mg.latent_heat;
+
+            if X < 1e-9 % 固相
+                H = Cp_total_solid * T;
+            elseif X >= 1e-9 && X < 1 % 熔化中
+                H = H_solid_at_melt + X * L_m_total;
+            else % 液相
+                tempState_liquid = particleState.copy();
+                tempState_liquid.T_p = T_melt; % 使用熔点温度估算液相热容
+                Cp_total_liquid = obj.calculate_total_heat_capacity(tempState_liquid);
+                
+                H_liquid_at_melt = H_solid_at_melt + L_m_total;
+                H = H_liquid_at_melt + Cp_total_liquid * (T - T_melt);
+            end
+        end
+
+        function pStateOut = get_state_from_enthalpy(obj, H, pStateIn)
+            % 根据总焓 H 反算颗粒的状态（温度和熔化分数）
+            pStateOut = pStateIn.copy();
+
+            % 使用与get_enthalpy_from_state一致的逻辑和近似
+            tempState_solid = pStateIn.copy();
+            tempState_solid.T_p = obj.params.initial_temperature;
+            Cp_total_solid = obj.calculate_total_heat_capacity(tempState_solid);
+            
+            T_melt = obj.params.materials.Mg.melting_point;
+            
+            H_solid_at_melt = Cp_total_solid * T_melt;
+            L_m_total = pStateIn.m_mg * obj.params.materials.Mg.latent_heat;
+            
+            if L_m_total < 1e-12 % 防止除零
+                H_liquid_at_melt = H_solid_at_melt;
+            else
+                H_liquid_at_melt = H_solid_at_melt + L_m_total;
+            end
+
+            if H < H_solid_at_melt
+                pStateOut.T_p = H / Cp_total_solid;
+                pStateOut.melted_fraction = 0;
+            elseif H >= H_solid_at_melt && H <= H_liquid_at_melt
+                pStateOut.T_p = T_melt;
+                if L_m_total > 1e-12
+                    pStateOut.melted_fraction = (H - H_solid_at_melt) / L_m_total;
+                else
+                    pStateOut.melted_fraction = 1.0;
+                end
+            else
+                tempState_liquid = pStateIn.copy();
+                tempState_liquid.T_p = T_melt;
+                Cp_total_liquid = obj.calculate_total_heat_capacity(tempState_liquid);
+                
+                pStateOut.T_p = T_melt + (H - H_liquid_at_melt) / Cp_total_liquid;
+                pStateOut.melted_fraction = 1.0;
+            end
+        end
+
     end
 end 

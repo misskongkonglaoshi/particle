@@ -1,261 +1,245 @@
 classdef VaporizationStage < handle
+    % VaporizationStage (气化阶段求解器) - V5 (最终版: 统一BVP求解)
+    %
+    % 核心功能:
+    % 对于一个处于沸点的、给定状态的颗粒，通过一次BVP调用，求解一个在物理上
+    % 完全自洽的稳态燃烧模型，同时得到反应速率和火焰结构。
+    %
+    % 求解逻辑:
+    % 使用bvp4c求解一个包含未知参数的边界值问题。
+    % 未知数 = [10个状态变量(T, Yi, d/dr), 火焰半径(r_f), 总蒸发速率(m_dot)]
+    % 方程数 = [10个ODE, 12个边界/界面条件]
+    % 通过这种方式，所有的物理定律（能量守恒、质量守恒、化学计量）都在
+    % 一个统一的框架内被同时满足。
+
     properties
-        params          % Simulation parameters
-        physicalModel   % 物理模型计算器
+        params          % 参数对象
+        physicalModel   % 物理模型对象
         thermo          % 热力学数据读取器
     end
-    
+
     methods
         function obj = VaporizationStage(params, physicalModel)
             % 构造函数
-            if nargin > 0
             obj.params = params;
             obj.physicalModel = physicalModel;
-                % 使用从上层传递下来的共享ThermoReader实例
-                obj.thermo = physicalModel.thermo_reader; 
+            obj.thermo = physicalModel.thermo_reader;
+        end
+
+        function rate_info = solve_reaction_rates(obj, pState)
+            % --- 主求解函数 ---
+            % 直接调用统一的BVP求解器
+            try
+                rate_info = obj.solve_unified_bvp(pState);
+            catch ME
+                fprintf('统一BVP求解失败: %s\n', ME.message);
+                
+                % V12 调试: 在BVP失败时输出关键尺度参数
+                r_p = pState.r_p;
+                r_inf = r_p + obj.params.flam_thickness;
+                fprintf('  > 失败时关键参数: r_p = %.3e m, r_inf = %.3e m (尺度差异: %.1f 倍)\n', ...
+                        r_p, r_inf, r_inf/r_p);
+
+                % 在某些极端条件下(如颗粒过小)，BVP可能无解。
+                % 在这种情况下，返回零速率，让ODE求解器终止。
+                rate_info.dmdt_mg = 0;
+                rate_info.dmdt_mgo = 0;
+                rate_info.dmdt_c = 0;
+                rate_info.r_f = pState.r_p;
+                rate_info.T_f = pState.T_p;
             end
         end
-        
-        function rate_info = solve(obj, particleState)
-            % SOLVE: 为给定的颗粒状态求解准稳态BVP问题,并返回关键速率
-            % 不再负责时间推进，仅作为ode45的"速率计算函数"的核心
-            
-            % 1. 求解准稳态气相场
-            sol_bvp = obj.solve_radial_bvp(particleState);
 
-            % 2. 从解中提取并返回关键结果
-            % params = [m_dot_mg_reac, r_f, beta]
-            rate_info.m_dot_mg_reac = sol_bvp.parameters(1);
-            rate_info.r_f = sol_bvp.parameters(2);
-            rate_info.beta = sol_bvp.parameters(3);
-        end
-        
-        function sol = solve_radial_bvp(obj, pState)
-            % --- 步骤 1: 定义物理常数和边界 ---
+        function rate_info = solve_unified_bvp(obj, pState)
+            % --- BVP求解器 (求解所有未知量) ---
+            
             r_p = pState.r_p;
-            T_p = pState.T_p;
-            r_inf = r_p + obj.params.flam_thickness;
-            
-            % 从参数文件加载摩尔质量 (kg/mol)
-            M_Mg = obj.params.materials.Mg.molar_mass;
-            M_CO2 = obj.params.materials.CO2.molar_mass;
-            M_MgO = obj.params.materials.MgO.molar_mass;
-            M_CO = obj.params.materials.CO.molar_mass;
-            
-            % 反应化学计量系数 (质量基)
-            w_Mg = 1; % 参考
-            w_CO2 = M_CO2 / M_Mg;
-            w_MgO = M_MgO / M_Mg;
-            w_CO = M_CO / M_Mg;
-            
-            % 从热力学数据文件加载生成焓 (J/mol)
-            Hf_Mg = obj.thermo.get_property('Mg', 'Hf298');
-            Hf_CO2 = obj.thermo.get_property('CO2', 'Hf298');
-            Hf_MgO = obj.thermo.get_property('MgO', 'Hf298');
-            Hf_CO = obj.thermo.get_property('CO', 'Hf298');
-            
-            % 计算火焰面反应热 (J/kg of Mg)
-            Q_reac_f = (Hf_MgO + Hf_CO - Hf_Mg - Hf_CO2) / M_Mg;
+            r_inf = r_p + obj.params.flam_thickness; % V11 恢复: 使用固定厚度
 
-            % --- 步骤 2: 设置BVP求解器 ---
-            % 定义新的未知参数: [Mg蒸发率, 火焰半径, 产物内流比例]
-            m_dot_mg_guess = 4e-7;    % kg/s
-            r_f_guess = r_p + 0.5 * (r_inf - r_p); 
-            beta_guess = 0.5;         % 0-1
-            params_guess = [m_dot_mg_guess; r_f_guess; beta_guess];
+            % --- 对未知参数提供合理的初始猜测 ---
+            % p(1) = r_f, p(2) = m_dot_total
+            r_f_guess = r_p * 1.5;
+            m_dot_guess = 4 * pi * r_p * 1e-4;
 
-            % 定义求解网格 (分段BVP需要元胞数组)
-            mesh = {linspace(r_p, r_f_guess, 40), linspace(r_f_guess, r_inf, 40)};
-            solinit = bvpinit(mesh, @initial_guess, params_guess);
+            % --- 准备BVP的初始结构 (回到多区域方案A) ---
+            mesh1 = linspace(r_p, r_f_guess, 15);
+            mesh2 = linspace(r_f_guess, r_inf, 15);
+
+            % 多区域模式下 initial_guess 需要接收 region 参数
+            y_init_fun = @(r, region) obj.initial_guess(r, region, pState, r_f_guess);
+            solinit    = bvpinit({mesh1, mesh2}, y_init_fun, [r_f_guess, m_dot_guess]);
+
+            % --- 创建句柄并调用求解器 (多区域) ---
+            ode_handle = @(r, z, region, p) obj.bvp_ode(r, z, region, p(2));
+            bc_handle = @(yl, yr, p) obj.bvp_bc(yl, yr, p, pState);
             
-            bvp_options = bvpset('Stats','on', 'RelTol', 1e-4, 'AbsTol', 1e-6, 'NMax', 5000);
+            options = bvpset('NMax', 6000, 'RelTol', 1e-4, 'AbsTol', 1e-7);
+            sol = bvp4c(ode_handle, bc_handle, solinit, options);
+            
+            % --- 从解中提取结果并打包 ---
+            r_f_sol = sol.parameters(1);
+            m_dot_sol = sol.parameters(2);
+            
+            % 计算表面的CO消耗速率以完成打包
+            y_surf = sol.y(:,1);
+            dYco_dr_surf = y_surf(9);
+            Yco_surf = y_surf(4);
+            rho_D_avg = obj.params.rho_D_gas;
+            A_p = 4 * pi * pState.r_p^2;
+            m_dot_co_surf = -(A_p * rho_D_avg) * dYco_dr_surf + m_dot_sol * Yco_surf;
 
-            % 调用 bvp4c 求解
-            sol = bvp4c(@bvp_ode, @bvp_bc, solinit, bvp_options);
-
-            % --- 嵌套函数定义 ---
-
-            function dzdr = bvp_ode(r, z, region, params)
-                % 一阶ODE系统，在整个求解域内形式统一
-                % z(1-5): T, Y_Mg, Y_MgO, Y_CO, Y_CO2
-                % z(6-10): dTdr, dY_Mg_dr, dY_MgO_dr, dY_CO_dr, dY_CO2_dr
+            rate_info = obj.package_rate_info(m_dot_sol, m_dot_co_surf, sol, r_f_sol);
+        end
+        
+        function dzdr = bvp_ode(obj, r, z, region, m_dot) % 修正: 明确使用region参数
+            % BVP的常微分方程 (稳态输运方程)
+            % V16 修正: 明确使用 region 参数，这对多区域 bvp4c 至关重要
+            
+            % 提取当前状态变量
+            T = z(1,:);
+            props = obj.physicalModel.get_gas_properties(T);
+            k_gas = props.k_gas;
+            cp_gas = props.Cp_gas;
+            rho_D = obj.params.rho_D_gas;
+            
+            % 初始化导数矩阵
+            dzdr = zeros(size(z));
+            
+            % 根据区域应用相应的方程
+            if region == 1  % 区域1: r_p -> r_f
+                % 导数关系
+                dzdr(1:5,:) = z(6:10,:);
                 
-                % 解包基本未知参数
-                m_dot_mg_reac = params(1);
-                beta          = params(3);
-
-                % 计算衍生的总产物生成率 (kg/s)
-                m_prod_mgo_total = m_dot_mg_reac * w_MgO;
-                m_prod_co_total  = m_dot_mg_reac * w_CO;
-
-                % 计算在空间中恒定的总对流质量流率 (kg/s)
-                % m_dot_total = (Mg蒸发) - (向内流动的产物)
-                m_dot_total = m_dot_mg_reac - beta * (m_prod_mgo_total + m_prod_co_total);
+                % 能量方程
+                dzdr(6,:) = (m_dot * cp_gas ./ (4 * pi * r.^2 .* k_gas)) .* z(6,:) - (2./r) .* z(6,:);
                 
-                % 获取温度依赖的物性
-                T = z(1);
-                props = obj.physicalModel.get_gas_properties(T);
-                k_gas = props.k_gas;
-                cp_gas = props.cp_gas;
-                rho_D = 0.0005; % 简化假设 rho*D, TODO: 使用更精确的模型
-
-                % 求解所有10个微分方程
-                dzdr = zeros(10, 1);
-                dzdr(1:5) = z(6:10); % z' = z'
+                % 组分方程
+                common_term = m_dot ./ (4 * pi * r.^2 * rho_D);
+                dzdr(7:10,:) = common_term .* z(7:10,:) - (2./r) .* z(7:10,:);
+            else  % 区域2: r_f -> r_inf
+                % 导数关系
+                dzdr(1:5,:) = z(6:10,:);
                 
-                % 能量方程: d(dT/dr)/dr = ...
-                dzdr(6) = (m_dot_total * cp_gas / (4 * pi * k_gas)) * (z(6)/r^2) - (2/r) * z(6);
+                % 能量方程
+                dzdr(6,:) = (m_dot * cp_gas ./ (4 * pi * r.^2 .* k_gas)) .* z(6,:) - (2./r) .* z(6,:);
                 
-                % 组分方程: d(dY_i/dr)/dr = ... (i = Mg, MgO, CO, CO2)
-                common_term = (m_dot_total / (4 * pi * rho_D));
-                dzdr(7)  = common_term * (z(7)/r^2)  - (2/r) * z(7);
-                dzdr(8)  = common_term * (z(8)/r^2)  - (2/r) * z(8);
-                dzdr(9)  = common_term * (z(9)/r^2)  - (2/r) * z(9);
-                dzdr(10) = common_term * (z(10)/r^2) - (2/r) * z(10);
+                % 组分方程
+                common_term = m_dot ./ (4 * pi * r.^2 * rho_D);
+                dzdr(7:10,:) = common_term .* z(7:10,:) - (2./r) .* z(7:10,:);
             end
+        end
 
-            function res = bvp_bc(yleft, yright, params)
-                % 为三点BVP定义的23个边界条件
-                
-                % --- A. 解包所有变量 ---
-                % 1. 解包未知参数
-                m_dot_mg_reac = params(1);
-                r_f           = params(2);
-                beta          = params(3);
-                
-                % 2. 解包边界点状态向量
-                T_p_sol = yleft(1,1); Y_p_sol = yleft(2:5,1); d_p_sol = yleft(6:10,1);
-                T_f_L = yright(1,1); Y_f_L = yright(2:5,1); d_f_L = yright(6:10,1);
-                T_f_R = yleft(1,2);  Y_f_R = yleft(2:5,2);  d_f_R = yleft(6:10,2);
-                T_inf_sol = yright(1,2); Y_inf_sol = yright(2:5,2);
+        function res = bvp_bc(obj, yleft, yright, p, pState)
+            % BVP的边界/界面条件 (12个条件 for 10 ODEs + 2 parameters)
+            r_f = p(1);
+            m_dot = p(2);
+            r_p = pState.r_p;
 
-                % 3. 获取边界点的物性
-                props_p = obj.physicalModel.get_gas_properties(T_p_sol);
-                k_p = props_p.k_gas; rho_D_p = props_p.rho_gas * obj.params.D_gas;
-                props_f = obj.physicalModel.get_gas_properties(T_f_L);
-                k_f = props_f.k_gas; rho_D_f = props_f.rho_gas * obj.params.D_gas;
+            % --- 提取边界值 (多区域标准) ---
+            % yleft / yright 维度: nState × nRegion
+            % region 1 : r_p → r_f ; region 2 : r_f → r_inf
+            y_at_rp       = yleft(:,1);   % r = r_p
+            y_at_rf_left  = yright(:,1);  % r → r_f  (左侧)
+            y_at_rf_right = yleft(:,2);   % r_f ← r  (右侧)
+            y_at_rinf     = yright(:,2);  % r = r_inf
 
-                % 4. 计算衍生的质量流率
-                m_prod_mgo_total = m_dot_mg_reac * w_MgO;
-                m_prod_co_total  = m_dot_mg_reac * w_CO;
-                m_dot_total = m_dot_mg_reac - beta * (m_prod_mgo_total + m_prod_co_total);
+            r_inf = pState.r_p + obj.params.flam_thickness;
+            rho_D_avg = obj.params.rho_D_gas;
+            res = zeros(12,1);
 
-                % --- B. 定义通量计算辅助函数 ---
-                flux = @(r, Y, dY, rho_D_local) (Y * m_dot_total / (4*pi*r^2) - rho_D_local .* dY);
-                
-                % --- C. 定义23个边界条件的残差 ---
-                res = zeros(23, 1);
+            %% 1-4 颗粒表面 r = r_p
+            res(1) = y_at_rp(1) - pState.T_p;
+            B_m = exp(m_dot / (4*pi*r_p*rho_D_avg)) - 1;
+            Y_mg_s = B_m/(1+B_m);
+            res(2) = y_at_rp(2) - Y_mg_s;
+            res(3) = y_at_rp(8);
+            T_surf = y_at_rp(1);
+            dTdr_surf  = y_at_rp(6);
+            dYco_dr_s  = y_at_rp(9);
+            Yco_surf   = y_at_rp(4);
+            k_gas_surf = obj.physicalModel.get_gas_properties(T_surf).k_gas;
+            A_p        = 4*pi*r_p^2;
+            Q_cond     = -k_gas_surf * dTdr_surf * A_p;
+            m_dot_co_s = -(A_p*rho_D_avg)*dYco_dr_s + m_dot*Yco_surf;
+            H_reac_s   = obj.thermo.get_reaction_enthalpy('Mg(g)+CO(g)=MgO(s)+C(s)',T_surf);
+            Q_reac_s   = m_dot_co_s * (-H_reac_s / obj.params.materials.CO.molar_mass);
+            Q_rad      = obj.params.emissivity*obj.params.sigma*(T_surf^4-obj.params.ambient_temperature^4)*A_p;
+            Q_evap     = m_dot*obj.params.materials.Mg.latent_heat;
+            res(4)     = (Q_cond + Q_reac_s) - (Q_rad + Q_evap);
 
-                % --- BCs at r = r_p (颗粒表面, 6个条件) ---
-                res(1) = T_p_sol - T_p; % 1. 温度
-                
-                % 确保 M_species 是列向量以匹配 Y_p_sol 的维度
-                M_species = [M_Mg; M_MgO; M_CO; M_CO2];
-                MW_mix_p = 1 / sum(Y_p_sol ./ M_species);
-                p_sat_Mg = obj.thermo.get_p_sat(T_p_sol);
-                Y_Mg_sat = (p_sat_Mg / obj.params.ambient_pressure) * (M_Mg / MW_mix_p);
-                res(2) = Y_p_sol(1) - Y_Mg_sat; % 2. Mg饱和蒸气压
-                
-                res(4) = Y_p_sol(2); % 4. MgO完美沉积 (Y_MgO = 0)
-                res(5) = Y_p_sol(3); % 5. CO完美反应 (Y_CO = 0)
-                
-                J_CO2_p = flux(r_p, Y_p_sol(4), d_p_sol(5), rho_D_p);
-                res(6) = J_CO2_p; % 6. CO2在表面为惰性 (通量为0)
+            %% 5-7 远场 r = r_inf
+            res(5) = y_at_rinf(1) - obj.params.ambient_temperature;
+            res(6) = y_at_rinf(3) - 1.0;
+            res(7) = y_at_rinf(4);
 
-                % 3. 表面能量守恒
-                H_dep_MgO = 1.4e7; H_reac_CO_surf = 6.2e6; % TODO: move to params
-                J_MgO_p = flux(r_p, Y_p_sol(2), d_p_sol(3), rho_D_p);
-                J_CO_p  = flux(r_p, Y_p_sol(3), d_p_sol(4), rho_D_p);
-                J_Mg_p = m_dot_mg_reac / (4*pi*r_p^2); % 定义Mg蒸发通量
+            %% 8-12 火焰界面 r = r_f
+            res(8)  = y_at_rf_left(1) - y_at_rf_right(1);
+            res(9)  = y_at_rf_left(2);
+            res(10) = y_at_rf_right(3);
+            mw_mg  = obj.params.materials.Mg.molar_mass;
+            mw_co2 = obj.params.materials.CO2.molar_mass;
+            J_mg  = -(4*pi*r_f^2*rho_D_avg)*y_at_rf_left(7) + m_dot*y_at_rf_left(2);
+            J_co2 = -(4*pi*r_f^2*rho_D_avg)*y_at_rf_right(8)+ m_dot*y_at_rf_right(3);
+            res(11)= J_mg/mw_mg + J_co2/mw_co2;
+            T_f    = y_at_rf_left(1);
+            H_reac_f = obj.thermo.get_reaction_enthalpy('Mg(g)+CO2(g)=MgO(g)+CO(g)',T_f);
+            m_dot_mg_f = J_mg;
+            Q_flame = m_dot_mg_f*(-H_reac_f/mw_mg);
+            k_gas_f = obj.physicalModel.get_gas_properties(T_f).k_gas;
+            res(12)= (y_at_rf_right(6)-y_at_rf_left(6))*k_gas_f + Q_flame/(4*pi*r_f^2);
+        end
+                
+        function y = initial_guess(obj, r, region, pState_ig, r_f_ig) %#ok<INUSL>
+            % BVP的初始猜测值 (V15修正: 确保为网格点返回矩阵)
+            y = zeros(10, length(r)); % y的大小应为 (状态数 x 网格点数)
+            T_f_guess = 2500;
+            T_p = pState_ig.T_p;
+            T_amb = obj.params.ambient_temperature;
+            r_p = pState_ig.r_p;
+            r_inf = r_p + obj.params.flam_thickness; 
+            Y_mg_s_guess = 0.1; % Mg表面质量分数的猜测值
 
-                q_cond_out = -k_p * d_p_sol(1);
-                q_rad_out = obj.params.emissivity * obj.params.sigma * (T_p_sol^4 - obj.params.ambient_temperature^4);
-                q_evap_out = J_Mg_p * obj.params.materials.Mg.L_evap_Mg;
-                q_dep_MgO_in = -J_MgO_p * H_dep_MgO;
-                q_reac_CO_in = -J_CO_p * H_reac_CO_surf;
-                res(3) = q_cond_out + q_rad_out + q_evap_out - q_dep_MgO_in - q_reac_CO_in;
-
-                % --- BCs at r = r_inf (无穷远, 5个条件) ---
-                res(7) = T_inf_sol - obj.params.ambient_temperature; % T = T_inf
-                res(8) = Y_inf_sol(1);    % Y_Mg = 0
-                res(9) = Y_inf_sol(2);    % Y_MgO = 0
-                res(10) = Y_inf_sol(3);   % Y_CO = 0
-                res(11) = Y_inf_sol(4) - 1.0; % Y_CO2 = 1
-
-                % --- BCs at r = r_f (火焰面, 12个条件) ---
-                % 连续性条件
-                res(12) = T_f_L - T_f_R;         % 温度连续
-                res(15) = Y_f_L(2) - Y_f_R(2);   % Y_MgO连续
-                res(16) = Y_f_L(3) - Y_f_R(3);   % Y_CO连续
-                
-                % 火焰面定义 (反应物耗尽)
-                res(13) = Y_f_L(1); % 左侧Mg耗尽 (Y_Mg(r_f-) = 0)
-                res(14) = Y_f_R(4); % 右侧CO2耗尽 (Y_CO2(r_f+) = 0)
-                
-                % 计算火焰面处的通量
-                J_E_L = -k_f * d_f_L(1); J_E_R = -k_f * d_f_R(1);
-                J_Mg_L = flux(r_f, Y_f_L(1), d_f_L(2), rho_D_f);
-                J_MgO_L = flux(r_f, Y_f_L(2), d_f_L(3), rho_D_f); J_MgO_R = flux(r_f, Y_f_R(2), d_f_R(3), rho_D_f);
-                J_CO_L = flux(r_f, Y_f_L(3), d_f_L(4), rho_D_f); J_CO_R = flux(r_f, Y_f_R(3), d_f_R(4), rho_D_f);
-                J_CO2_L = flux(r_f, Y_f_L(4), d_f_L(5), rho_D_f);
-                J_CO2_R = flux(r_f, Y_f_R(4), d_f_R(5), rho_D_f);
-                
-                % 通量跳跃/守恒条件
-                source_E_f = (m_dot_mg_reac * Q_reac_f) / (4*pi*r_f^2);
-                res(17) = (J_E_L - J_E_R) - source_E_f; % 能量通量跳跃
-                
-                source_MgO_f = m_prod_mgo_total / (4*pi*r_f^2);
-                res(19) = (J_MgO_R - J_MgO_L) - source_MgO_f; % MgO通量跳跃
-                
-                source_CO_f = m_prod_co_total / (4*pi*r_f^2);
-                res(20) = (J_CO_R - J_CO_L) - source_CO_f; % CO通量跳跃
-                
-                res(21) = J_CO2_L; % 火焰面左侧CO2通量为0
-                
-                % 定义产物流向的条件
-                res(22) = J_MgO_L - (-beta * source_MgO_f); % 流向内部的MgO通量
-                res(23) = J_CO_L - (-beta * source_CO_f);  % 流向内部的CO通量
-                
-                % 化学计量比条件 (替换了旧的独立通量条件)
-                % 此处需要两个独立的残差来约束两个独立的通量，但我们只有一个res(18)了。
-                % 最核心的约束是化学计量比。
-                m_reac_co2_total = m_dot_mg_reac * w_CO2;
-                
-                % 定义一个组合残差，强制两个通量与各自的源项的化学计量比相等
-                err_mg = J_Mg_L / (-m_dot_mg_reac / (4*pi*r_f^2)); % 应为1
-                err_co2 = J_CO2_R / (-m_reac_co2_total / (4*pi*r_f^2)); % 应为1
-                res(18) = err_mg - err_co2; % 强制比率相等
-                end
-                
-            function y = initial_guess(r, k, p)
-                % 为BVP求解器提供状态向量的初始猜测
-                % y(1-5): T, Y_Mg, Y_MgO, Y_CO, Y_CO2
-                % y(6-10): 各自的导数
-                
-                r_f_g = p(2); % r_f is now the second parameter
-                
-                y = zeros(10,1);
-                
-                % 温度猜测: 从T_p线性下降到T_amb
-                T_f_guess = 2000;
-                
-                % 根据区域索引 k 提供猜测
-                if k == 1 % 区域 1: r_p -> r_f
-                    y(1) = T_p - (T_p - T_f_guess) * (r - r_p) / (r_f_g - r_p);
-                    y(2) = 0.1 * (1 - (r - r_p) / (r_f_g - r_p)); % Y_Mg
-                    y(3) = 0.05 * ((r - r_p) / (r_f_g - r_p));    % Y_MgO
-                    y(4) = 0.05 * ((r - r_p) / (r_f_g - r_p));    % Y_CO
-                    y(5) = 0; % Y_CO2
-                else % 区域 2: r_f -> r_inf
-                    y(1) = T_f_guess - (T_f_guess - obj.params.ambient_temperature) * (r - r_f_g) / (r_inf - r_f_g);
-                    y(2) = 0; % Y_Mg
-                    y(3) = 0.1 * (1 - (r - r_f_g) / (r_inf - r_f_g)); % Y_MgO
-                    y(4) = 0.1 * (1 - (r - r_f_g) / (r_inf - r_f_g)); % Y_CO
-                    y(5) = 1.0 * (r - r_f_g) / (r_inf - r_f_g); % Y_CO2
-                end
-                
-                % 导数猜测可以设为0
+            if region == 1 % 区域1: r_p -> r_f
+                frac = (r - r_p) / (r_f_ig - r_p + eps); % 加eps避免除零
+                y(1,:) = T_p + (T_f_guess - T_p) .* frac;
+                y(2,:) = Y_mg_s_guess .* (1 - frac);
+                y(3,:) = 0; % MATLAB会自动广播
+                y(4,:) = 0.1 .* frac .* (1-frac); % CO
+                y(5,:) = 0.1 .* frac; % MgO
+            else % 区域2: r_f -> r_inf
+                frac = (r - r_f_ig) / (r_inf - r_f_ig + eps); % 加eps避免除零
+                y(1,:) = T_f_guess - (T_f_guess - T_amb) .* frac;
+                y(2,:) = 0;
+                y(3,:) = 1.0 .* frac;
+                y(4,:) = 0.1 .* (1-frac);
+                y(5,:) = 0.1; % MATLAB会自动广播
             end
+        end
+        
+        function rate_info_out = package_rate_info(obj, m_dot_mg_total, m_dot_co_surf, sol, r_f)
+            % --- 辅助函数: 将最终结果打包成结构体 ---
+            mw_mg = obj.params.materials.Mg.molar_mass;
+            mw_mgo = obj.params.materials.MgO.molar_mass;
+            mw_c = obj.params.materials.C.molar_mass;
+            mw_co = obj.params.materials.CO.molar_mass;
+
+            rate_info_out.dmdt_mg = -m_dot_mg_total;
+            
+            % 计算表面生成的MgO和C的速率
+            m_dot_mgo_surf = m_dot_co_surf * (mw_mgo / mw_co);
+            rate_info_out.dmdt_c = m_dot_co_surf * (mw_c / mw_co);
+            
+            % 计算火焰面生成的MgO的速率
+            m_dot_mg_surf_equiv = m_dot_co_surf * (mw_mg/mw_co);
+            m_dot_mg_flame = m_dot_mg_total - m_dot_mg_surf_equiv;
+            m_dot_mgo_flame = m_dot_mg_flame * (mw_mgo / mw_mg);
+
+            rate_info_out.dmdt_mgo = m_dot_mgo_surf + m_dot_mgo_flame;
+            
+            % 存储火焰面信息
+            rate_info_out.r_f = r_f;
+            sol_at_rf = deval(sol, r_f);
+            rate_info_out.T_f = sol_at_rf(1);
         end
     end
 end

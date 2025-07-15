@@ -29,7 +29,8 @@ classdef Parameters < handle
             'C', struct(...
                 'density', 2267, ...
                 'heat_capacity', 709, ...
-                'molar_mass', 12.011e-3 ...
+                'molar_mass', 12.011e-3, ...
+                'Hf298', 0 ...              % 标准生成焓 (J/mol), 稳定单质为0
             ), ...
             'CO', struct(...
                 'molar_mass', 28.010e-3, ...
@@ -68,18 +69,22 @@ classdef Parameters < handle
         
         % 仿真控制参数
         time_step = 1e-6;          % 时间步长 (s)
-        total_time = 1;          % 总仿真时间 (s)
+        total_time = 0.5;          % 总仿真时间 (s)
         t_combustion = 0.05;       % 气相燃烧求解时长 (s)
         output_interval = 1000;     % 输出间隔（步数）
         
         % 气相计算初始设置火焰面 1.5倍初始直径
         flam_thickness = 2.5e-5;      % 气膜厚度 (m)
         
+        % 气相输运简化参数 (密度 * 扩散系数)
+        rho_D_gas = 2e-5;            % kg/(m·s), 一个关键的输运参数
+
         % 气体物理属性 (示例值, 应根据实际情况调整)
         gas_properties = struct(...
             'k_gas', 0.1, ...       % 气体混合物平均热导率 (W/(m·K))
             'rho_gas', 0.2, ...     % 气体混合物平均密度 (kg/m^3)
-            'Cp_gas', 1500 ...      % 气体混合物平均比热 (J/(kg·K))
+            'Cp_gas', 1500, ...      % 气体混合物平均比热 (J/(kg·K))
+            'cp_gas', 1500 ... % 固体比热 (J/(kg·K))
         );
         
         % 求解器配置

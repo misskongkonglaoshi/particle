@@ -102,7 +102,7 @@ classdef ParticleState < handle
                 obj.m_mgo = 0.0;
                 obj.m_c = 0.0;
                 obj.melted_fraction = 0.0;
-                obj.energy_accumulated = 0.0;
+                obj.energy_accumulated = 0;
                 obj.is_melting = false;
                 obj.is_reacting = false;
             end
@@ -174,66 +174,42 @@ classdef ParticleState < handle
             end
         end
         
-        function update_state_from_reaction(obj, delta_mass_mg)
-            % 根据反应造成的质量变化更新颗粒状态（不包括温度）
-            % 输入:
-            %   delta_mass_mg: Mg质量的变化量 (kg，负值表示消耗)
-
-            if abs(delta_mass_mg) < 1e-20
-                % 质量变化太小，忽略
-                return;
-            end
-            
-            % 1. 更新质量
-            mw_mg = obj.params.materials.Mg.molar_mass;
-            mw_mgo = obj.params.materials.MgO.molar_mass;
-            mw_c = obj.params.materials.C.molar_mass;
-            
-            % 2Mg + CO2 -> 2MgO + C 反应中的计量关系
-            delta_mol_mg = -delta_mass_mg / mw_mg; % Mg摩尔数的变化 (mol, 正值)
-            
-            obj.m_mg = obj.m_mg + delta_mass_mg;
-            obj.m_mgo = obj.m_mgo + delta_mol_mg * mw_mgo;
-            obj.m_c = obj.m_c + 0.5 * delta_mol_mg * mw_c;
-            
-            % 2. 根据新质量更新几何状态
-            obj.update_geometry_from_mass();
-        end
-
         function update_geometry_from_mass(obj)
             % 根据当前质量更新几何参数（半径、厚度）
+            % 假设产物层 (MgO+C) 形成一个包裹Mg核心的球壳
             
-            % 计算Mg核心体积和半径
+            % 1. 计算Mg核心的体积和半径
             v_mg = obj.m_mg / obj.params.materials.Mg.density;
+            if v_mg < 1e-20 % 防止负数开根
+                v_mg = 0;
+            end
             obj.r_c = (3 * v_mg / (4 * pi))^(1/3);
-            a=obj.r_c^3;
-            % 计算颗粒半径
-            obj.r_p = ((obj.m_mgo / obj.params.materials.MgO.density*3/4/pi)+a)^(1/3);
-            % 计算氧化层厚度
+
+            % 2. 计算产物层 (MgO+C) 的体积
+            v_mgo = obj.m_mgo / obj.params.materials.MgO.density;
+            v_c = obj.m_c / obj.params.materials.C.density;
+            v_product_shell = v_mgo + v_c;
+            
+            % 3. 计算总的颗粒体积（核心 + 产物壳层）
+            v_total = v_mg + v_product_shell;
+            
+            % 4. 计算总的颗粒半径
+            obj.r_p = (3 * v_total / (4 * pi))^(1/3);
+
+            % 5. 计算产物层厚度
             obj.oxide_thickness = obj.r_p - obj.r_c;
         end
         
         function new_obj = copy(obj)
             % 创建当前对象的一个深拷贝
+            new_obj = ParticleState(obj.params); % 调用构造函数以确保所有属性被初始化
             
-            % 1. 创建一个同类的新实例，但不调用构造函数
-            new_obj = feval(class(obj)); 
-            
-            % 2. 获取所有属性的元数据
-            props = metaclass(obj).PropertyList;
-            
-            % 3. 逐一复制属性
+            % 复制所有公共属性的值
+            props = properties(obj);
             for i = 1:length(props)
-                prop = props(i);
-                % 只复制非瞬态、非依赖、公共的属性
-                if ~prop.Transient && ~prop.Dependent && strcmp(prop.GetAccess, 'public')
-                    new_obj.(prop.Name) = obj.(prop.Name);
-                end
+                prop_name = props{i};
+                new_obj.(prop_name) = obj.(prop_name);
             end
-            
-            % 4. 特殊处理私有属性 (如果需要)
-            % params 是一个对象引用, 直接复制引用即可
-            new_obj.params = obj.params;
         end
     end
 end 

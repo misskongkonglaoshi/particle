@@ -20,15 +20,16 @@ fprintf('初始氧化层厚度: %.2e m\n', params.initial_oxide_thickness);
 results = manager.solve();
 fprintf('仿真完成！\n');
 
-% 可视化结果
-Visualization.plotResults(results);
+% 调用外部可视化函数
+%  Visualization.plotResults(results);
 
 % 保存结果
 if ~exist('results', 'dir')
     mkdir('results');
 end
-Visualization.saveResults(results, 'results/simulation_results.mat');
-Visualization.exportToCSV(results, 'results/simulation_results.csv');
+save('results/simulation_results.mat', 'results');
+writetable(struct2table(results), 'results/simulation_results.csv');
+
 
 % 打印仿真信息
 fprintf('\n仿真信息:\n');
