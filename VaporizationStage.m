@@ -43,7 +43,7 @@ classdef VaporizationStage < handle
                 
                 % 在BVP失败时输出关键尺度参数
                 r_p = pState.r_p;
-                r_inf = r_p + obj.params.flam_thickness;
+                r_inf = 20 * r_p; % 与solve_vaporization_bvp.m中保持一致
                 fprintf('  > 关键参数: r_p = %.3e m, r_inf = %.3e m (尺度差异: %.1f 倍)\n', ...
                         r_p, r_inf, r_inf/r_p);
 
