@@ -46,12 +46,12 @@ classdef VaporizationStage < handle
                 r_inf = r_p + obj.params.flam_thickness;
                 fprintf('  > 关键参数: r_p = %.3e m, r_inf = %.3e m (尺度差异: %.1f 倍)\n', ...
                         r_p, r_inf, r_inf/r_p);
-                
+
                 fprintf('详细错误堆栈:\n');
                 for i = 1:length(ME.stack)
                     fprintf('  > 文件: %s, 行: %d, 函数: %s\n', ...
                         ME.stack(i).file, ME.stack(i).line, ME.stack(i).name);
-                end
+        end
                 
                 % 重新抛出错误以终止整个计算
                 rethrow(ME);

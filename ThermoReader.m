@@ -6,6 +6,7 @@ classdef ThermoReader < handle
         params
         species_data
         Ru = 8.31446261815324; % J/(mol·K)
+        warned_species = {}; % V31: 新增，用于记录已警告过的缺失物种
     end
     
     methods
@@ -202,7 +203,13 @@ classdef ThermoReader < handle
                 elseif is_solid && isfield(obj.params.materials, thermo_key)
                     % 如果是固相且在thermo.dat中找不到, 则回退到params.m中的Hf298
                     % 这是一个近似, 忽略了固相焓随温度的变化
-                    fprintf('注意: 在thermo.dat中未找到固相 "%s", 已回退使用params.m中定义的Hf298。\n', species_name);
+                    
+                    % V31: 增加只警告一次的逻辑
+                    if ~ismember(species_name, obj.warned_species)
+                        fprintf('注意: 在thermo.dat中未找到固相 "%s", 已回退使用params.m中定义的Hf298。\n', species_name);
+                        obj.warned_species{end+1} = species_name;
+                    end
+
                     H_total = H_total + coeff * obj.params.materials.(thermo_key).Hf298;
                 else
                     error('ThermoReader:SpeciesNotFound', ...

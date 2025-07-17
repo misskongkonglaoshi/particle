@@ -10,6 +10,7 @@ classdef StageManager < handle
         
         % 结果存储
         results       % 包含所有历史记录的结构体
+        vaporization_rate_info_cache % V12: 用于在气化阶段ODE求解中缓存BVP结果
     end
     
     methods
@@ -74,31 +75,36 @@ classdef StageManager < handle
                         end
                         
                     case 'vaporization'
-                        % --- V11 重构: 外部增生模型 ---
+                        % --- V12 修改: 增加OutputFcn来缓存BVP结果 ---
 
                         % 1. 将颗粒温度锁定在沸点
                         T_boil = obj.params.materials.Mg.ignition_temp;
                         obj.model.particleState.T_p = T_boil;
-                        fprintf('--- 进入气化阶段 (外部增生模型), 颗粒温度锁定在 %.1f K ---\n', T_boil);
+                        fprintf('--- 进入气相燃烧阶段, 颗粒温度锁定在 %.1f K ---\n', T_boil);
 
-                        % 2. 初始化求解器
+                        % 2. 初始化求解器和结果缓存
                         vaporization_solver = VaporizationStage(obj.params, obj.physicalModel);
+                        obj.vaporization_rate_info_cache = {}; % V12: 初始化缓存
                         
                         % 3. 设置ODE的初始状态向量 [m_mg, m_mgo, m_c, r_c, r_p]
                         pState = obj.model.particleState;
                         y0 = [pState.m_mg, pState.m_mgo, pState.m_c, pState.r_c, pState.r_p];
 
-                        % 4. 设置求解时间区间和事件
+                        % 4. 设置求解时间区间、事件和OutputFcn
                         t_span = [current_time, obj.params.total_time];
-                        ode_options = odeset('RelTol', 1e-5, 'Events', @(t,y) obj.vaporization_events(t,y));
+                        output_fcn_handle = @(t,y,flag) obj.vaporization_output_fcn(t, y, flag, vaporization_solver, T_boil);
+                        ode_options = odeset('RelTol', 1e-5, 'Events', @(t,y) obj.vaporization_events(t,y), 'OutputFcn', output_fcn_handle);
                         
                         % 5. 求解状态向量变化的ODE
                         [t_stage, y_stage] = ode45(@(t,y) obj.vaporization_ode(t, y, vaporization_solver, T_boil), t_span, y0, ode_options);
                         
                         % 6. 将状态向量历史转换为状态对象历史, 并记录火焰信息
-                        [state_stage_history, flame_info_history] = obj.convert_state_vector_to_state_history(t_stage, y_stage, T_boil);
+                        [state_stage_history, flame_info_history] = obj.convert_state_vector_to_state_history(t_stage, y_stage, T_boil, obj.vaporization_rate_info_cache);
                         
-                        % --- 结束重构 ---
+                        % 7. 清理缓存
+                        obj.vaporization_rate_info_cache = {};
+
+                        % --- 结束修改 ---
                 end
 
                 if isempty(t_stage)
@@ -153,8 +159,8 @@ classdef StageManager < handle
                 dmdt_c   = rate_info.dmdt_c;
             catch ME
                 fprintf('t=%.4f s 时反应速率求解失败: %s\n', t, ME.message);
-                dydt = zeros(5,1);
-                return;
+                % 重新抛出错误，这将中止ODE求解器
+                rethrow(ME);
             end
 
             % 3. 新增核心逻辑: 计算半径变化率
@@ -214,8 +220,11 @@ classdef StageManager < handle
             
             % 记录火焰信息
             if ~isempty(flame_info_history)
+                % V12: 确保flame_info_history是一个结构体数组
+                if isstruct(flame_info_history)
                 obj.results.flame_radius = [obj.results.flame_radius; [flame_info_history.r_f]'];
                 obj.results.flame_temperature = [obj.results.flame_temperature; [flame_info_history.T_f]'];
+                end
             else
                 % 如果没有火焰信息，用NaN填充
                 obj.results.flame_radius = [obj.results.flame_radius; nan(length(t), 1)];
@@ -224,8 +233,8 @@ classdef StageManager < handle
             % --- 结束修改 ---
         end
 
-        function [state_history, flame_info_history] = convert_state_vector_to_state_history(obj, t_stage, y_stage, T_p_const)
-            % --- V11 重构: 处理包含5个状态变量的向量 ---
+        function [state_history, flame_info_history] = convert_state_vector_to_state_history(obj, t_stage, y_stage, T_p_const, rate_info_cache)
+            % --- V12 修改: 不再重复求解BVP，而是使用缓存的结果 ---
             % y_stage 是一个 N x 5 的矩阵 [m_mg, m_mgo, m_c, r_c, r_p]
             num_steps = size(y_stage, 1);
             if num_steps == 0
@@ -233,38 +242,73 @@ classdef StageManager < handle
                 flame_info_history = [];
                 return;
             end
+
+            % V12: 检查缓存大小与步数是否匹配
+            if num_steps ~= length(rate_info_cache)
+                warning('StageManager:cacheMismatch', ...
+                        'ode45返回的步数 (%d) 与OutputFcn缓存的速率信息数 (%d) 不匹配。火焰信息可能不准确。', ...
+                        num_steps, length(rate_info_cache));
+            end
+
             state_history(1, num_steps) = ParticleState(); % 预分配
             flame_info_history(1, num_steps) = struct('r_f', NaN, 'T_f', NaN);
-            
-            vaporization_solver = VaporizationStage(obj.params, obj.physicalModel);
             
             for i = 1:num_steps
                 % 1. 从状态向量填充ParticleState对象
                 currentState = y_stage(i, :);
-                tempState = ParticleState(obj.params); % 创建一个全新的状态对象
-                tempState.m_mg  = currentState(1);
-                tempState.m_mgo = currentState(2);
-                tempState.m_c   = currentState(3);
-                tempState.r_c   = currentState(4);
-                tempState.r_p   = currentState(5);
-                tempState.oxide_thickness = tempState.r_p - tempState.r_c;
-                tempState.T_p = T_p_const;
-                % 在气化阶段，熔化分数始终为1
-                tempState.melted_fraction = 1.0; 
+                tempState = obj.build_temp_state_from_vector(currentState, T_p_const);
                 state_history(i) = tempState;
                 
-                % 2. 重新计算该点的速率以获取火焰信息
-                 try
-                    rate_info = vaporization_solver.solve_reaction_rates(tempState);
+                % 2. V12: 直接从缓存中读取火焰信息
+                if i <= length(rate_info_cache)
+                    rate_info = rate_info_cache{i};
                     flame_info_history(i).r_f = rate_info.r_f;
                     flame_info_history(i).T_f = rate_info.T_f;
-                catch
-                    flame_info_history(i).r_f = NaN;
-                    flame_info_history(i).T_f = NaN;
                 end
             end
         end
 
+
+        % --- V12 新增: ODE求解相关的辅助函数 ---
+        function status = vaporization_output_fcn(obj, t, y, flag, solver, T_p_const)
+            % 作为ode45的OutputFcn, 在每个成功的时间步计算并缓存BVP结果
+            status = 0; % 默认继续积分
+            try
+                switch flag
+                    case 'init'
+                        % 在积分开始时调用
+                        % y是初始状态向量y0
+                        tempState = obj.build_temp_state_from_vector(y, T_p_const);
+                        rate_info = solver.solve_reaction_rates(tempState);
+                        obj.vaporization_rate_info_cache{1} = rate_info;
+                    case ''
+                        % 在每个积分步后调用
+                        % y可能包含多个时间步的结果，y的每一列是一个时间点的状态
+                        for i = 1:size(y, 2)
+                           tempState = obj.build_temp_state_from_vector(y(:,i), T_p_const);
+                           rate_info = solver.solve_reaction_rates(tempState);
+                           obj.vaporization_rate_info_cache{end+1} = rate_info;
+                        end
+                end
+            catch ME
+                fprintf('OutputFcn在t=%.4f s计算BVP时失败: %s. 终止积分。\n', t(1), ME.message);
+                status = 1; % 返回1以终止积分
+            end
+        end
+
+        function tempState = build_temp_state_from_vector(obj, y_vec, T_p_const)
+             % 辅助函数: 从状态向量构建一个临时的ParticleState对象
+             tempState = ParticleState(obj.params);
+             tempState.m_mg  = y_vec(1);
+             tempState.m_mgo = y_vec(2);
+             tempState.m_c   = y_vec(3);
+             tempState.r_c   = y_vec(4);
+             tempState.r_p   = y_vec(5);
+             tempState.oxide_thickness = tempState.r_p - tempState.r_c;
+             tempState.T_p = T_p_const;
+             tempState.melted_fraction = 1.0;
+        end
+        % --- 结束 V12 新增 ---
 
 
         %%%%%  本质即从运行计算的结果中读取想要的参数结果 转化为易于出图的结构形式。
