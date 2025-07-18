@@ -51,7 +51,7 @@ global GLOBAL_BVP_DEPS;
     m_dot_phys_guess = Q_rad / L_v;
     
     % 如果计算出的值太小，使用一个合理的最小值
-    min_m_dot = 1e-7; % 增大最小值，提高数值稳定性
+    min_m_dot = 1e-10; % 增大最小值，提高数值稳定性
     if m_dot_phys_guess < min_m_dot
         m_dot_phys_guess = min_m_dot;
     end
@@ -60,23 +60,22 @@ global GLOBAL_BVP_DEPS;
     p_guess_nd(1) = r_f_phys_guess / L_char; % r_f*
     p_guess_nd(2) = m_dot_phys_guess / (4 * pi * L_char * params.rho_D_gas); % Pe_m (佩克莱数)
     
+    %  fprintf('  > 猜测质量流率分子: %.3e , 无量纲分母: %.3e \n', m_dot_phys_guess, 4 * pi * L_char * params.rho_D_gas);
     % 使用固定的外部边界
     r_inf_nd = r_inf_phys_fixed / L_char; % 使用当前半径r_p进行无量纲化
-    
-    % 修改: 简化网格结构，确保区域边界的明确定义
-    % 使用更简化但清晰的网格，遵循bvp4c的多区域配置协议
-    
-    % 区域1：颗粒表面到火焰面
-    r1_points = linspace(1, p_guess_nd(1), 8); % 均匀分布点
 
-    % 区域2：火焰面到远场边界
-    r2_points = linspace(p_guess_nd(1), r_inf_nd, 8); % 均匀分布点
+    %%%%%%网格
+        % 区域1：颗粒表面到火焰面
+        r1_points = linspace(1, p_guess_nd(1), 8); % 均匀分布点
 
-    % 确保使用相同的精确火焰点值
-    r_f_exact = p_guess_nd(1);  % 使用精确的参数值，而不是可能受精度影响的数组值
+        % 区域2：火焰面到远场边界
+        r2_points = linspace(p_guess_nd(1), r_inf_nd, 8); % 均匀分布点
 
-    % 关键：明确地在数组中包含两个完全相同的火焰点，确保bvp4c识别为多区域
-    x_mesh_nd = [r1_points(1:end-1), r_f_exact, r_f_exact, r2_points(2:end)];
+        % 确保使用相同的精确火焰点值
+        r_f_exact = p_guess_nd(1);  % 使用精确的参数值，而不是可能受精度影响的数组值
+
+        % 关键：明确地在数组中包含两个完全相同的火焰点，确保bvp4c识别为多区域
+        x_mesh_nd = [r1_points(1:end-1), r_f_exact, r_f_exact, r2_points(2:end)];
 
     % 验证重复点是否完全相同
     fprintf('重复点检查: r_f_nd(1) == r_f_nd(2): %d\n', x_mesh_nd(8) == x_mesh_nd(9));
@@ -273,9 +272,9 @@ function res = bc_func_nd(ya, yb, p_nd)
 
     % 从全局设置读取松弛级别，如果未设置则使用默认值
     if isfield(deps, 'relaxation_level')
-        base_relaxation = deps.relaxation_level;
-    else
-        base_relaxation = 0.8; % 默认松弛因子
+            base_relaxation = deps.relaxation_level;
+        else
+            base_relaxation = 0.8; % 默认松弛因子
     end
     
     % 为不同类型的条件设置不同的松弛级别
@@ -354,11 +353,9 @@ function res = bc_func_nd(ya, yb, p_nd)
     % (共5个条件)
     res(6) = relaxation * (y_at_rinf_nd(1) - deps.params.ambient_temperature / deps.T_char); % BC 6: 温度等于环境温度
     res(7) = relaxation * (y_at_rinf_nd(3) - 1.0); % BC 7: CO2质量分数为1 (纯CO2环境)
-    % BC 8: 火焰面处产物质量分数之和为1（替换原来的远场Mg=0条件，避免与火焰面条件冗余）
-    % 这符合Burke-Schumann模型，火焰面处反应物完全转化为产物
-    % 左侧火焰面产物质量分数
-    y_left_products_sum = y_at_rf_left_nd(4) + y_at_rf_left_nd(5); % CO + MgO
-    res(8) = relaxation * (y_left_products_sum - 1.0);
+    
+    % BC 8: 火焰面左侧所有组分质量分数之和为1（替换为更基本的物理约束，避免与元素守恒冗余）
+    res(8) = relaxation * (sum(y_at_rf_left_nd(2:5)) - 1.0);
     res(9) = relaxation * y_at_rinf_nd(4); % BC 9: CO质量分数为0
     res(10) = relaxation * y_at_rinf_nd(5); % BC 10: MgO质量分数为0
 
@@ -366,7 +363,7 @@ function res = bc_func_nd(ya, yb, p_nd)
     
     % (3a) 状态连续性 (5个条件) - 始终使用松弛因子
     flame_relaxation = relaxation; % 使用全局松弛因子
-    for i = 1:5
+        for i = 1:5
         res(10+i) = flame_relaxation * (y_at_rf_left_nd(i) - y_at_rf_right_nd(i)); 
     end
     
@@ -412,20 +409,30 @@ function res = bc_func_nd(ya, yb, p_nd)
     % 计算CO的净通量（修复J_co_net未定义问题）
     J_co_net = J_co_right_nd - J_co_left_nd;
 
-    % 保留关键的摩尔通量平衡 (条件19-20)
-    res(19) = chem_relaxation * (J_mg_flame/mw.Mg.molar_mass - J_co2_flame/mw.CO2.molar_mass);
-    res(20) = chem_relaxation * (J_mg_flame/mw.Mg.molar_mass - J_co_net/mw.CO.molar_mass);
+    % 添加验证
+    if sign(J_co_left_nd) == sign(J_co_right_nd)
+        fprintf('警告: CO在火焰面两侧通量方向相同，J_left=%.3e, J_right=%.3e\n', J_co_left_nd, J_co_right_nd);
+    end
 
-    % 火焰面右侧所有组分和为1
-    res(21) = weak_relaxation * (y_at_rf_right_nd(2) + y_at_rf_right_nd(3) + y_at_rf_right_nd(4) + y_at_rf_right_nd(5) - 1.0);
-
-    % 替换为元素守恒条件：Mg原子在火焰面两侧的守恒
-    % Mg的总摩尔通量 = MgO的总摩尔通量 (基于元素守恒)
+    % 替换为元素守恒条件 
+    % 镁元素守恒：进入的Mg = 出去的MgO中的Mg
     J_mg_total = J_mg_flame;  % 左侧Mg通量
-    J_mgo_total = J_mgo_left_nd + J_mgo_right_nd;  % 两侧MgO通量之和
-    res(22) = weak_relaxation * (J_mg_total/mw.Mg.molar_mass - J_mgo_total/(mw.MgO.molar_mass/mw.Mg.molar_mass));
+    % 修正MgO通量计算，考虑方向性（净流出 = 右侧 - 左侧）
+    J_mgo_net = J_mgo_right_nd - J_mgo_left_nd;  % 两侧MgO净通量，与CO通量计算方式一致
+    res(19) = chem_relaxation * (J_mg_total/mw.Mg.molar_mass - J_mgo_net/(mw.MgO.molar_mass/mw.Mg.molar_mass));
+    
+    % 碳元素守恒：进入的CO2中的C = 出去的CO中的C
+    res(20) = chem_relaxation * (J_co2_flame/mw.CO2.molar_mass - J_co_net/mw.CO.molar_mass);
+    
+    % 替换为产物两侧扩散比例约束：假设产物向两侧扩散的摩尔比例相等
+    % 计算CO向右侧扩散的比例（占总CO通量的比例）
+    res(21) = weak_relaxation * (J_co_right_nd + J_co_left_nd);
+    
+    % 替换为远场温度梯度趋于零条件
+    % 这是一个物理上合理的约束：远离热源区域，温度梯度应该趋于稳定
+    res(22) = weak_relaxation * y_at_rinf_nd(6);
 
-end 
+end
 
 function y_nd = initial_guess_func_nd(x, region)
     global GLOBAL_BVP_DEPS;
@@ -763,15 +770,40 @@ function analyze_jacobian(bcfun, solinit, p_nd)
         if rank_Jy < n_eqs
             fprintf('检测到 %d 个线性相关的行!\n', n_eqs - rank_Jy);
             
-            [~, R, E] = qr(Jy');
-            small_diag = find(abs(diag(R)) < tol * max(abs(diag(R))));
-            dependent_rows = E(small_diag);
+            % 使用SVD方法更稳健地识别线性相关行
+            [U, S, ~] = svd(Jy);
+            s = diag(S);
             
-            fprintf('可能线性相关的边界条件:\n');
-            for i = 1:length(dependent_rows)
-                fprintf('  - 条件 #%d\n', dependent_rows(i));
+            % 找到接近零的奇异值对应的左奇异向量
+            small_sv_idx = find(abs(s) < tol * max(abs(s)));
+            
+            % 分析每个线性相关的组合
+            fprintf('可能线性相关的边界条件组合:\n');
+            for i = 1:length(small_sv_idx)
+                % 获取对应的左奇异向量，它表示线性组合系数
+                v = U(:, small_sv_idx(i));
+                
+                % 找出贡献最大的几个条件
+                [~, idx] = sort(abs(v), 'descend');
+                top_contributors = idx(1:min(5, length(idx))); % 选择前5个贡献最大的条件
+                
+                fprintf('  组合 #%d 主要贡献条件: ', i);
+                for j = 1:length(top_contributors)
+                    cond_idx = top_contributors(j);
+                    fprintf('#%d(系数=%.3f) ', cond_idx, v(cond_idx));
+                end
+                fprintf('\n');
+                
+                % 分析边界条件之间的关系
+                if length(top_contributors) >= 2
+                    main_cond = top_contributors(1);
+                    second_cond = top_contributors(2);
+                    ratio = v(second_cond) / v(main_cond);
+                    fprintf('    条件 #%d 约等于 %.3f * 条件 #%d\n', second_cond, -ratio, main_cond);
+                end
             end
             
+            % 仍然保留原来的相关性图分析
             figure;
             corr_matrix = corr(Jy');
             imagesc(corr_matrix);
@@ -783,6 +815,25 @@ function analyze_jacobian(bcfun, solinit, p_nd)
             saveas(gcf, 'jacobian_correlation.png');
             fprintf('雅可比矩阵相关性热图已保存到 jacobian_correlation.png\n');
         end
+        
+        % 在SVD分析后添加以下代码
+        % 识别对条件数贡献最大的元素
+        [max_row, max_col] = find(abs(Jy) == max(abs(Jy(:))));
+        fprintf('最大元素(%.3e)位于：行 %d (条件 #%d), 列 %d\n', max(abs(Jy(:))), max_row, max_row, max_col);
+
+        [min_elem_val, min_elem_idx] = min(abs(Jy(abs(Jy)>0)));  % 非零最小元素
+        [min_row, min_col] = ind2sub(size(Jy), min_elem_idx);
+        fprintf('最小非零元素(%.3e)位于：行 %d (条件 #%d), 列 %d\n', min_elem_val, min_row, min_row, min_col);
+
+        % 计算每个条件的灵敏度
+        cond_sensitivity = zeros(n_eqs, 1);
+        for i = 1:n_eqs
+            Jy_temp = Jy;
+            Jy_temp(i,:) = [];  % 移除一行
+            cond_sensitivity(i) = cond(Jy_temp);
+        end
+        [~, most_sensitive] = min(cond_sensitivity);
+        fprintf('移除条件 #%d 后条件数最小(%.3e)\n', most_sensitive, cond_sensitivity(most_sensitive));
         
     catch ME
         fprintf('雅可比矩阵分析过程中出错: %s\n', ME.message);
