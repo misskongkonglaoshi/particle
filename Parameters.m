@@ -91,7 +91,7 @@ classdef Parameters < handle
         flam_thickness = 2.5e-5;      % 气膜厚度 (m)
         
         % 气相输运简化参数 (密度 * 扩散系数)
-        rho_D_gas = 2e-5;            % kg/(m·s), 一个关键的输运参数
+        rho_D_gas = 2.73e-5;            % kg/(m·s), 一个关键的输运参数
 
         % V33: 气体物理属性 (新增，用于温度依赖)
         gas_properties = struct(...

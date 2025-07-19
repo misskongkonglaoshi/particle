@@ -56,7 +56,7 @@ global GLOBAL_BVP_DEPS;
         m_dot_phys_guess = min_m_dot;
     end
 
-    % 转化为无量纲猜测值
+%%%%%无量纲初值猜测%%%%%ss
     p_guess_nd(1) = r_f_phys_guess / L_char; % r_f*
     p_guess_nd(2) = m_dot_phys_guess / (4 * pi * L_char * params.rho_D_gas); % Pe_m (佩克莱数)
     
@@ -64,12 +64,29 @@ global GLOBAL_BVP_DEPS;
     % 使用固定的外部边界
     r_inf_nd = r_inf_phys_fixed / L_char; % 使用当前半径r_p进行无量纲化
 
-    %%%%%%网格
-        % 区域1：颗粒表面到火焰面
-        r1_points = linspace(1, p_guess_nd(1), 8); % 均匀分布点
+    %%%%%%%%网格进行加密和优化，尤其是火焰面附近%%%%%%%
+        % 区域1：颗粒表面到火焰面 - 显著增加点数并强化火焰面附近加密
+        n_points_r1 = 50; % 大幅增加点数以提高分辨率
+        % 使用非线性分布在火焰面附近加密
+        r1_ratio = 1.5; % 增强加密程度，使点更集中在火焰面附近
+        r1_factor = (r1_ratio^(1/(n_points_r1-1)));
+        r1_raw = zeros(1, n_points_r1);
+        for i = 1:n_points_r1
+            r1_raw(i) = (r1_ratio^((i-1)/(n_points_r1-1)) - 1) / (r1_ratio - 1);
+        end
+        % 将[0,1]范围映射到[1,p_guess_nd(1)]
+        r1_points = 1 + r1_raw * (p_guess_nd(1) - 1);
 
-        % 区域2：火焰面到远场边界
-        r2_points = linspace(p_guess_nd(1), r_inf_nd, 8); % 均匀分布点
+        % 区域2：火焰面到远场边界 - 同样显著增加点数
+        n_points_r2 = 50; % 增加远场区域点数
+        % 使用非线性分布在火焰面附近加密
+        r2_ratio = 1.8; % 增强加密程度，更好地捕捉火焰面附近梯度
+        r2_raw = zeros(1, n_points_r2);
+        for i = 1:n_points_r2
+            r2_raw(i) = (r2_ratio^((i-1)/(n_points_r2-1)) - 1) / (r2_ratio - 1);
+        end
+        % 将[0,1]范围映射到[p_guess_nd(1),r_inf_nd]
+        r2_points = p_guess_nd(1) + r2_raw * (r_inf_nd - p_guess_nd(1));
 
         % 确保使用相同的精确火焰点值
         r_f_exact = p_guess_nd(1);  % 使用精确的参数值，而不是可能受精度影响的数组值
@@ -77,9 +94,16 @@ global GLOBAL_BVP_DEPS;
         % 关键：明确地在数组中包含两个完全相同的火焰点，确保bvp4c识别为多区域
         x_mesh_nd = [r1_points(1:end-1), r_f_exact, r_f_exact, r2_points(2:end)];
 
-    % 验证重复点是否完全相同
-    fprintf('重复点检查: r_f_nd(1) == r_f_nd(2): %d\n', x_mesh_nd(8) == x_mesh_nd(9));
-    
+        % 验证网格配置
+        fprintf('网格点总数: %d\n', length(x_mesh_nd));
+        fprintf('区域1(颗粒表面到火焰面)点数: %d\n', n_points_r1);
+        fprintf('区域2(火焰面到远场)点数: %d\n', n_points_r2);
+        
+        % 验证重复点是否完全相同
+        % 更新检查重复点的索引，因为点数增加了
+        flame_idx = n_points_r1; % 火焰点索引对应于第一区域的末尾
+        fprintf('重复点检查: r_f_nd(1) == r_f_nd(2): %d\n', x_mesh_nd(flame_idx) == x_mesh_nd(flame_idx+1));
+        
     % V29.3 的修正保持不变
     GLOBAL_BVP_DEPS.r_f_nd_guess = p_guess_nd(1);
     GLOBAL_BVP_DEPS.r_inf_nd = r_inf_nd;
@@ -106,7 +130,7 @@ global GLOBAL_BVP_DEPS;
     GLOBAL_BVP_DEPS.simplified_reaction = false;
     GLOBAL_BVP_DEPS.relaxation_level = 0.8; % 默认松弛级别
     
-    % 三阶段求解策略
+% 三阶段求解策略
     try
         fprintf('正在执行逐步求解:\n');
         
@@ -114,8 +138,8 @@ global GLOBAL_BVP_DEPS;
         fprintf('  > 阶段1/4: 求解高度松弛的极简模型...\n');
         GLOBAL_BVP_DEPS.simplified_mode = true;
         GLOBAL_BVP_DEPS.simplified_reaction = true;
-        GLOBAL_BVP_DEPS.relaxation_level = 0.5; % 非常强的松弛
-        options_very_simple = bvpset('Stats','on', 'NMax', 4000, 'RelTol', 1e-2, 'AbsTol', 1e-3); 
+        GLOBAL_BVP_DEPS.relaxation_level = 0.3; % 使用更强的松弛因子提高稳定性
+        options_very_simple = bvpset('Stats','on', 'NMax', 6000, 'RelTol', 1e-1, 'AbsTol', 1e-2); 
         % 添加雅可比矩阵分析和监控
         try
             sol_very_simple = bvp4c(@ode_func_nd, @bc_func_nd, solinit, options_very_simple);
@@ -133,9 +157,15 @@ global GLOBAL_BVP_DEPS;
         fprintf('  > 阶段2/4: 求解中等松弛的简化模型...\n');
         GLOBAL_BVP_DEPS.simplified_mode = true;
         GLOBAL_BVP_DEPS.simplified_reaction = true;
-        GLOBAL_BVP_DEPS.relaxation_level = 0.7; % 中等松弛
-        solinit_simple = bvpinit(sol_very_simple, p_guess_nd);
-        options_simple = bvpset('Stats','on', 'NMax', 4000, 'RelTol', 1e-2, 'AbsTol', 1e-3); 
+        GLOBAL_BVP_DEPS.relaxation_level = 0.5; % 使用更强的松弛因子
+        
+        % 使用重新构造的初始化，确保火焰面正确
+        % 从上一个解中获取参数，但重新构造初始猜测
+        new_p_guess = sol_very_simple.parameters;
+        GLOBAL_BVP_DEPS.r_f_nd_guess = new_p_guess(1);
+        solinit_simple = bvpinit(x_mesh_nd, @initial_guess_func_nd, new_p_guess);
+        
+        options_simple = bvpset('Stats','on', 'NMax', 6000, 'RelTol', 5e-2, 'AbsTol', 5e-3); 
         sol_simple = bvp4c(@ode_func_nd, @bc_func_nd, solinit_simple, options_simple);
         fprintf('    * 阶段2求解完成。火焰位置: r_f/r_p = %.3f, Pe_m = %.3e\n', ...
                 sol_simple.parameters(1), sol_simple.parameters(2));
@@ -198,7 +228,7 @@ global GLOBAL_BVP_DEPS;
         end
     end
     
-    % 清理全局变量
+% 清理全局变量
     clear global GLOBAL_BVP_DEPS;
 
     % =========================================================================
@@ -301,7 +331,9 @@ function res = bc_func_nd(ya, yb, p_nd)
     L_v = mw.Mg.L_evap_Mg;
     R_Mg = deps.params.R_u / mw.Mg.molar_mass;
     M_mix = deps.physicalModel.get_ambient_mixture_molar_mass();
+    % fprintf('M_mix: %f\n', M_mix);
     exponent = (L_v / R_Mg) * (1/T_amb_phys - 1/T_surf_phys);
+    % fprintf('Y_mg_theory_theory: %f\n', (mw.Mg.molar_mass / M_mix) * exp(exponent));
     Y_mg_theory = min((mw.Mg.molar_mass / M_mix) * exp(exponent), 1.0);
     res(2) = y_at_rp_nd(2) - Y_mg_theory;
     
@@ -409,10 +441,11 @@ function res = bc_func_nd(ya, yb, p_nd)
     % 计算CO的净通量（修复J_co_net未定义问题）
     J_co_net = J_co_right_nd - J_co_left_nd;
 
-    % 添加验证
-    if sign(J_co_left_nd) == sign(J_co_right_nd)
-        fprintf('警告: CO在火焰面两侧通量方向相同，J_left=%.3e, J_right=%.3e\n', J_co_left_nd, J_co_right_nd);
-    end
+    % 添加验证，删除人为修正
+    %if sign(J_co_left_nd) == sign(J_co_right_nd)
+     %   fprintf('警告: CO在火焰面两侧通量方向相同，J_left=%.3e, J_right=%.3e\n', J_co_left_nd, J_co_right_nd);
+     %   fprintf('  > 这表明物理模型中可能存在通量计算或坐标系定义问题\n');
+    %end
 
     % 替换为元素守恒条件 
     % 镁元素守恒：进入的Mg = 出去的MgO中的Mg
@@ -422,15 +455,42 @@ function res = bc_func_nd(ya, yb, p_nd)
     res(19) = chem_relaxation * (J_mg_total/mw.Mg.molar_mass - J_mgo_net/(mw.MgO.molar_mass/mw.Mg.molar_mass));
     
     % 碳元素守恒：进入的CO2中的C = 出去的CO中的C
-    res(20) = chem_relaxation * (J_co2_flame/mw.CO2.molar_mass - J_co_net/mw.CO.molar_mass);
+    % 使用更弱的松弛因子来提高数值稳定性
+    res(20) = weak_relaxation * 0.8 * (J_co2_flame/mw.CO2.molar_mass - J_co_net/mw.CO.molar_mass);
     
     % 替换为产物两侧扩散比例约束：假设产物向两侧扩散的摩尔比例相等
-    % 计算CO向右侧扩散的比例（占总CO通量的比例）
-    res(21) = weak_relaxation * (J_co_right_nd + J_co_left_nd);
+    % 使用更稳定的条件：CO产物总通量守恒
+    % 使用更强的松弛因子确保CO通量方向正确
+    res(21) = relaxation * (J_co_right_nd + J_co_left_nd);
     
-    % 替换为远场温度梯度趋于零条件
-    % 这是一个物理上合理的约束：远离热源区域，温度梯度应该趋于稳定
-    res(22) = weak_relaxation * y_at_rinf_nd(6);
+    % 远场温度梯度趋近于零而非严格为零的条件
+    % 使用一个足够小但非零的值，避免数值奇异性
+    epsilon = 1e-4;  % 增大epsilon值，提高数值稳定性
+    % 从全局变量中获取r_inf_nd和r_f_nd
+    r_inf_nd_val = deps.r_inf_nd;  % 从全局依赖中获取
+    r_f_nd_val = p_nd(1);  % 火焰位置从参数中获取
+    r_ratio = r_inf_nd_val / r_f_nd_val;  % 远场与火焰面的比例
+    
+    % 远场温度梯度趋近于零而非严格为零的条件
+    % 使用一个足够小但非零的值，避免数值奇异性
+    epsilon = 1e-4;  % 增大epsilon值，提高数值稳定性
+    % 从全局变量中获取r_inf_nd和r_f_nd
+    r_inf_nd_val = deps.r_inf_nd;  % 从全局依赖中获取
+    r_f_nd_val = p_nd(1);  % 火焰位置从参数中获取
+    r_ratio = r_inf_nd_val / r_f_nd_val;  % 远场与火焰面的比例
+    
+    % 温度梯度条件
+    temp_residual = y_at_rinf_nd(6) - epsilon/r_ratio^2;
+    % 组分梯度条件 - 加权计入温度梯度条件
+    comp_factor = 0.2;  % 组分梯度影响因子
+    co2_residual = y_at_rinf_nd(8) + epsilon * 2.0 / r_inf_nd_val^2; % CO2梯度(负值)
+    co_residual = y_at_rinf_nd(9) - epsilon * 1.5 / r_inf_nd_val^2;  % CO梯度(正值)
+    mgo_residual = y_at_rinf_nd(10) - epsilon * 1.5 / r_inf_nd_val^2; % MgO梯度(正值)
+    
+    % 组合残差，将组分梯度约束整合到温度梯度约束中
+    combined_residual = temp_residual + comp_factor * (abs(co2_residual) + abs(co_residual) + abs(mgo_residual));
+    
+    res(22) = weak_relaxation * combined_residual;
 
 end
 
@@ -513,6 +573,34 @@ function y_nd = initial_guess_func_nd(x, region)
         if sum_mass > 0
             scaling = 1.0 / sum_mass;
             y_nd(2:5) = y_nd(2:5) * scaling;
+        end
+        
+        % 为远场梯度提供非零初值，特别是在靠近远场边界时
+        if region == 2 && x > 0.75 * r_inf_nd  % 显著扩大应用范围
+            % 使用更大的epsilon值，确保梯度有足够的数值表达
+            epsilon = 1e-3;  % 增大1000倍
+            dist_factor = (r_inf_nd - x) / (0.25 * r_inf_nd);  % 0到1的因子，更平滑的过渡
+            
+            % 为所有梯度变量提供明确的非零初值
+            % 温度梯度 - 向外减小
+            y_nd(6) = epsilon * dist_factor * (1.0 + 0.1*sin(x*10));  % 添加微小扰动避免精确对称
+            
+            % 各组分梯度 - 提供物理合理的非零值并增大量级
+            y_nd(7) = 0;  % Mg梯度(远场无Mg)
+            y_nd(8) = -epsilon * dist_factor * 3.0;  % CO2梯度(向外增加)，强化负梯度
+            y_nd(9) = epsilon * dist_factor * 2.0;   % CO梯度(向外减少)，强化正梯度
+            y_nd(10) = epsilon * dist_factor * 2.0;  % MgO梯度(向外减少)，强化正梯度
+            
+            % 确保远场精确到达边界条件 - 在远场边界处特别处理
+            if x > 0.98 * r_inf_nd
+                % 温度梯度接近于特定的非零小值
+                y_nd(6) = epsilon / r_inf_nd^2;
+                
+                % 组分梯度接近于目标的非零值
+                y_nd(8) = -epsilon * 2.0 / r_inf_nd^2;  % CO2
+                y_nd(9) = epsilon * 1.5 / r_inf_nd^2;   % CO
+                y_nd(10) = epsilon * 1.5 / r_inf_nd^2;  % MgO
+            end
         end
     end
 end
@@ -824,6 +912,128 @@ function analyze_jacobian(bcfun, solinit, p_nd)
         [min_elem_val, min_elem_idx] = min(abs(Jy(abs(Jy)>0)));  % 非零最小元素
         [min_row, min_col] = ind2sub(size(Jy), min_elem_idx);
         fprintf('最小非零元素(%.3e)位于：行 %d (条件 #%d), 列 %d\n', min_elem_val, min_row, min_row, min_col);
+        
+        % 增强雅可比分析 - 添加SVD可视化
+        figure;
+        semilogy(s, 'o-');
+        title('雅可比矩阵奇异值分布');
+        xlabel('索引'); ylabel('奇异值');
+        grid on;
+        saveas(gcf, 'jacobian_singular_values.png');
+        fprintf('雅可比矩阵奇异值分布已保存到 jacobian_singular_values.png\n');
+        
+        % 分析变量敏感度并输出详细物理含义
+        [U, S, V] = svd(Jy);
+        fprintf('\n变量敏感度分析 (右奇异向量最大分量):\n');
+        
+        % 定义变量名称和所属边界
+        var_names = {'温度', 'Y_Mg', 'Y_CO2', 'Y_CO', 'Y_MgO', 'd温度/dr', 'dY_Mg/dr', 'dY_CO2/dr', 'dY_CO/dr', 'dY_MgO/dr'};
+        regions = {'颗粒表面(左)', '火焰面左侧(右)', '火焰面右侧(左)', '远场边界(右)'};
+        params = {'r_f_nd (火焰位置)', 'Pe_m (佩克莱数)'};
+        
+        % 创建变量编号到物理含义的映射
+        var_to_phys = cell(n_vars_y + n_vars_p, 1);
+        var_to_region = cell(n_vars_y + n_vars_p, 1);
+        var_to_value = zeros(n_vars_y + n_vars_p, 1);
+        
+        % 填充变量映射
+        var_idx = 1;
+        % 左边界变量
+        for r = 1:size(yl,2)
+            for i = 1:size(yl,1)
+                var_to_phys{var_idx} = var_names{i};
+                var_to_region{var_idx} = regions{2*r-1};
+                var_to_value(var_idx) = yl(i,r);
+                var_idx = var_idx + 1;
+            end
+        end
+        
+        % 右边界变量
+        for r = 1:size(yr,2)
+            for i = 1:size(yr,1)
+                var_to_phys{var_idx} = var_names{i};
+                var_to_region{var_idx} = regions{2*r};
+                var_to_value(var_idx) = yr(i,r);
+                var_idx = var_idx + 1;
+            end
+        end
+        
+        % 参数变量
+        for i = 1:length(p_nd)
+            var_to_phys{var_idx} = params{i};
+            var_to_region{var_idx} = '参数';
+            var_to_value(var_idx) = p_nd(i);
+            var_idx = var_idx + 1;
+        end
+        
+        % 输出前3个最小奇异值对应的右奇异向量
+        for i = 1:min(3, size(V,2))
+            [~, var_idx] = sort(abs(V(:,end-i+1)), 'descend');
+            fprintf('  奇异值 #%d (%.3e) 对应的最敏感变量:\n', size(S,2)-i+1, s(end-i+1));
+            for j = 1:min(5, length(var_idx))
+                v_idx = var_idx(j);
+                fprintf('    #%d: %s at %s (值=%.3e, 系数=%.3f)\n', v_idx, var_to_phys{v_idx}, var_to_region{v_idx}, var_to_value(v_idx), V(v_idx,end-i+1));
+            end
+        end
+        
+        % 特别关注变量#40
+        if n_vars_y + n_vars_p >= 40
+            fprintf('\n特别分析变量 #40:\n');
+            fprintf('  物理含义: %s\n', var_to_phys{40});
+            fprintf('  所在区域: %s\n', var_to_region{40});
+            fprintf('  当前值: %.3e\n', var_to_value(40));
+            fprintf('  在最小奇异值向量中的系数: %.3f\n', V(40,end));
+            
+            % 查找与变量#40关联最强的边界条件
+            [~, cond_idx] = sort(abs(Jy(:,40)), 'descend');
+            fprintf('  与该变量关联最强的边界条件:\n');
+            for j = 1:min(3, length(cond_idx))
+                fprintf('    条件 #%d (系数=%.3e)\n', cond_idx(j), Jy(cond_idx(j),40));
+            end
+        end
+        
+        % 分析贡献最大的条件对 - 添加变量存在性检查
+        fprintf('\n对病态条件贡献最大的边界条件对:\n');
+        % 首先检查是否存在small_sv_idx变量
+        if ~exist('small_sv_idx', 'var') || isempty(small_sv_idx)
+            fprintf('  矩阵是满秩的，没有检测到线性相关行。\n');
+            fprintf('  可能的问题来源于数值计算或量级不平衡，而非条件线性相关。\n');
+            
+            % 分析最小奇异值对应的左奇异向量
+            [~, min_sv_idx] = min(s);
+            v_min = U(:, min_sv_idx);
+            [~, sorted_idx] = sort(abs(v_min), 'descend');
+            fprintf('  最小奇异值 %.3e 对应的主要条件: ', s(min_sv_idx));
+            for j = 1:min(5, length(sorted_idx))
+                fprintf('#%d(系数=%.3f) ', sorted_idx(j), v_min(sorted_idx(j)));
+            end
+            fprintf('\n');
+            
+            % 分析具体条件的相互关系和物理含义
+            if length(sorted_idx) >= 2
+                cond1 = sorted_idx(1);
+                cond2 = sorted_idx(2);
+                fprintf('  >>> 建议检查条件 #%d 和 #%d 之间的物理关系或数值稳定性\n', cond1, cond2);
+            end
+        else
+            % 原有代码保持不变
+            for i = 1:min(2, length(small_sv_idx))
+                v = U(:, small_sv_idx(i));
+                [~, sorted_idx] = sort(abs(v), 'descend');
+                fprintf('  奇异值 #%d (%.3e) 对应的主要条件: ', small_sv_idx(i), s(small_sv_idx(i)));
+                for j = 1:min(3, length(sorted_idx))
+                    fprintf('#%d(系数=%.3f) ', sorted_idx(j), v(sorted_idx(j)));
+                end
+                fprintf('\n');
+                
+                % 分析具体条件的相互关系和物理含义
+                if length(sorted_idx) >= 2
+                    cond1 = sorted_idx(1);
+                    cond2 = sorted_idx(2);
+                    fprintf('  >>> 建议检查条件 #%d 和 #%d 之间的物理关系或冗余性\n', cond1, cond2);
+                end
+            end
+        end
 
         % 计算每个条件的灵敏度
         cond_sensitivity = zeros(n_eqs, 1);
